@@ -23,6 +23,7 @@ const sammler = require('./lib/sammler');
 const feldsuche = require('./lib/feldsuche');
 const kontrolle = require('./lib/kontrolle');
 const leafscan = require('./lib/leafscan');
+const { ScanPlaner } = require('./lib/scanplaner');
 const leafverlauf = require('./lib/leafverlauf');
 const ids = require('./lib/ids');
 const felder = require('./lib/felder');
@@ -3710,63 +3711,43 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
-     * Den langsamen Leaf-Scan anwerfen, falls er nicht schon laeuft - siehe lib/leafscan.js.
+     * Den langsamen Leaf-Scan anwerfen - je Geraet mit gesetztem Schalter eine eigene Schleife,
+     * falls fuer dieses Geraet noch keine laeuft. Siehe lib/scanplaner.js.
      *
-     * EIN Planer fuer alle Geraete: Er fragt reihum hoechstens eine Adresse je leafscan.TAKT_MS,
-     * nie zwei Geraete gleichzeitig. Er endet von selbst, sobald kein Scan-Schalter mehr steht.
+     * JE GERAET EIN EIGENER TAKT (seit 13.11.2026 abends): hoechstens eine Anfrage je
+     * leafscan.TAKT_MS und Geraet, nie zwei gleichzeitig an dasselbe Geraet. Verschiedene Geraete
+     * laufen unabhaengig und parallel - ein haengender Backofen haelt Wasch- und Spuelmaschine nicht
+     * mehr auf. Eine Schleife endet von selbst, sobald ihr Schalter faellt.
      */
     scanPlanerStarten() {
-        if (this._scanPlanerLaeuft || this.stopping) {
+        if (this.stopping) {
             return;
         }
-        this._scanPlanerLaeuft = true;
-        this.scanPlaner()
-            .catch(e => this.log.warn(`Leaf scan planner failed - ${e.message}`))
-            .finally(() => {
-                this._scanPlanerLaeuft = false;
-            });
-    }
-
-    async scanPlaner() {
         this._scan = this._scan || {};
-        let reihe = 0;
-        this.log.info(
-            `Leaf scan (slow): at most one request every ${leafscan.TAKT_MS / 1000} s across all appliances, ` +
-                'only while the module answers (during a programme at most one per minute per appliance)',
-        );
-        while (!this.stopping) {
-            const aktiv = [];
-            for (const deviceId of Object.keys(this.devices || {})) {
-                const st = await this.getStateAsync(ids.s(deviceId, 'scan'));
-                if (st && st.val === true) {
-                    aktiv.push(deviceId);
-                } else if (this._scan[deviceId]) {
-                    // Abgeschaltet: Ungesichertes sichern und den Zwischenstand vergessen - beim
-                    // naechsten Einschalten wird frisch aus dem Datenpunkt gelesen.
-                    await this.scanSichern(deviceId, true);
-                    delete this._scan[deviceId];
-                    this.log.info(`${deviceId}: leaf scan stopped.`);
-                }
-            }
-            if (!aktiv.length) {
-                this.log.info('Leaf scan planner idle - no appliance has the scan switched on');
-                return;
-            }
-            let gefragt = false;
-            for (let i = 0; i < aktiv.length && !gefragt && !this.stopping; i++) {
-                const deviceId = aktiv[(reihe + i) % aktiv.length];
-                try {
-                    gefragt = (await this.scanSchritt(deviceId)) === 'gefragt';
-                } catch (e) {
-                    this.log.warn(`${deviceId}: leaf scan step failed - ${e.message}`);
-                }
-                if (gefragt) {
-                    reihe = (reihe + i + 1) % aktiv.length;
-                }
-            }
-            // Nach einer Anfrage der Takt, sonst eine Minute bis zum naechsten Blick.
-            await new Promise(r => this.setTimeout(r, gefragt ? leafscan.TAKT_MS : 60000));
+        if (!this._scanPlaner) {
+            this._scanPlaner = new ScanPlaner({
+                geraete: () => Object.keys(this.devices || {}),
+                aktiv: async deviceId => {
+                    const st = await this.getStateAsync(ids.s(deviceId, 'scan'));
+                    return !!(st && st.val === true);
+                },
+                schritt: deviceId => this.scanSchritt(deviceId),
+                beendet: async deviceId => {
+                    if (this._scan[deviceId]) {
+                        // Abgeschaltet: Ungesichertes sichern und den Zwischenstand vergessen -
+                        // beim naechsten Einschalten wird frisch aus dem Datenpunkt gelesen.
+                        await this.scanSichern(deviceId, true);
+                        delete this._scan[deviceId];
+                        this.log.info(`${deviceId}: leaf scan stopped.`);
+                    }
+                },
+                warten: ms => new Promise(r => this.setTimeout(r, ms)),
+                stopp: () => !!this.stopping,
+                log: this.log,
+                taktMs: leafscan.TAKT_MS,
+            });
         }
+        this._scanPlaner.starten().catch(e => this.log.warn(`Leaf scan could not be started - ${e.message}`));
     }
 
     /**
@@ -3806,7 +3787,9 @@ class MieleLocal extends utils.Adapter {
      * Ein Schritt des langsamen Scans fuer ein Geraet: hoechstens EINE Anfrage.
      *
      * @param {string} deviceId Geraete-ID
-     * @returns {Promise<'gefragt'|'warten'>} 'gefragt', wenn eine Anfrage an das Geraet ging
+     * @returns {Promise<'gefragt'|'warten'|'ausweichen'|number>} 'gefragt', wenn eine Anfrage an das
+     *          Geraet ging; 'ausweichen', wenn die normale Abfrage gerade dran ist; eine Zahl nennt
+     *          die Wartezeit in ms bis zum naechsten sinnvollen Versuch
      */
     async scanSchritt(deviceId) {
         const dev = this.devices && this.devices[deviceId];
@@ -3836,7 +3819,7 @@ class MieleLocal extends utils.Adapter {
         };
         const uhr = t => new Date(t).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
         if (z.pauseBis > jetzt) {
-            return 'warten';
+            return z.pauseBis - jetzt;
         }
 
         /*
@@ -3859,7 +3842,16 @@ class MieleLocal extends utils.Adapter {
         // antwortete.
         const gebremst = erlaubt === 'betrieb' || (z.schonBis && z.schonBis > jetzt);
         if (gebremst && z.letzteAnfrage && jetzt - z.letzteAnfrage < leafscan.BETRIEB_ABSTAND_MS) {
-            return 'warten';
+            return z.letzteAnfrage + leafscan.BETRIEB_ABSTAND_MS - jetzt;
+        }
+        /*
+         * Der normalen Abfrage ausweichen: Laeuft gerade eine Anfrage an dieses Geraet oder steht
+         * eine an (/State, EcoFeedback, Steuerbefehl), wartet der Scan ein paar Sekunden. Die
+         * Warteschlange in lib/api.js wuerde ihn ohnehin hinten anstellen - so drueckt er aber
+         * nicht direkt hinter der normalen Abfrage nach.
+         */
+        if (dev.api && dev.api.offen > 0) {
+            return 'ausweichen';
         }
         z.letzteAnfrage = jetzt;
 
@@ -4680,8 +4672,8 @@ class MieleLocal extends utils.Adapter {
                  * der Scan kam in vier Wochen ueber 23 Adressen nicht hinaus.
                  *
                  * Jetzt laeuft er weiter, bis nichts mehr offen ist oder der Schalter umgelegt
-                 * wird - seit 13.11.2026 langsam: ein Planer fuer alle Geraete, eine Anfrage je
-                 * 25 s, im Programm gebremst (siehe leafscan.scanErlaubt).
+                 * wird - seit 13.11.2026 langsam: je Geraet ein eigener Takt (lib/scanplaner.js),
+                 * eine Anfrage je 25 s, im Programm gebremst (siehe leafscan.scanErlaubt).
                  */
                 await this.setStateAsync(id, { val: true, ack: true });
                 this.scanPlanerStarten();

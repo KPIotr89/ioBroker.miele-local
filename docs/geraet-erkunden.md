@@ -44,8 +44,17 @@ bedeutet „scanne, bis fertig", bis nichts mehr offen ist oder der Schalter umg
 **Seit dem 13.11.2026 langsam und schonend** (vorher Durchgänge zu 40 Adressen im 5-s-Abstand,
 die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
 
-- **Ein Planer für alle Geräte**, nie zwei gleichzeitig, **höchstens eine Anfrage je 25 s**
-  (Kontrollfrage eingeschlossen), Zeitlimit 8 s je Anfrage.
+- **Jedes Gerät hat seinen eigenen, unabhängigen Takt** (`lib/scanplaner.js`): **höchstens
+  eine Anfrage je 25 s und Gerät** (Kontrollfrage eingeschlossen), nie zwei Anfragen
+  gleichzeitig an dasselbe Gerät, Zeitlimit 8 s je Anfrage. Verschiedene Geräte laufen
+  parallel — es sind verschiedene Module mit eigener IP. Rückzug, Ruhe, Schonphase oder ein
+  hängendes Modul eines Geräts verzögern die anderen nicht. (Bis zum Abend des 13.11.2026
+  gab es einen gemeinsamen Planer für alle Geräte; der Backofen H2469BP, dessen DOP2 nach 3–10
+  Anfragen minutenlang hängt, hielt damit Wasch- und Spülmaschine mit auf.)
+- **Die normale Abfrage hat Vorrang:** Läuft gerade eine Anfrage an das Gerät oder steht eine an
+  (/State, EcoFeedback, Steuerbefehl), weicht der Scan aus und schaut nach 5 s wieder. Ein
+  Gerät, das wartet (Ruhe, Rückzug, gebremst), schaut spätestens nach einer Minute wieder,
+  ob sich etwas geändert hat.
 - Gescannt wird bei Status **aus (1)** oder **an (2)** seit mindestens 5 min, **Programmende
   (7)** seit mindestens 2 min und — bewusst — **im Programm (5)** ab der zehnten Minute, dort
   aber höchstens eine Anfrage pro Minute und Gerät, und ein 500 zählt im Programm nie. Grund
@@ -56,7 +65,8 @@ die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
   404 = wach; 500/503 = schläft → 10 min Ruhe).
 - **Rückzug bei Störungen** (Timeout, Verbindung abgelehnt/abgebrochen): 5, 10, 20, 30 min
   Pause für dieses Gerät, danach eine Stunde Schonphase mit höchstens einer Anfrage pro Minute
-  (Backofen H2469BP: Timeouts nach ~10 Adressen im 25-s-Takt, /State lief weiter). Die Stufe
+  (Backofen H2469BP: Timeouts nach ~10 Adressen im 25-s-Takt, /State lief weiter). Rückzug,
+  Schonphase und Stufe gelten je Gerät. Die Stufe
   sinkt erst wieder, wenn die Schonphase ohne neue Störung abgelaufen ist – eine einzelne gute
   Antwort reicht nicht (sonst pendelt der Rückzug zwischen 5 und 10 min). Eine Adresse,
   die dreimal stört oder bei wachem Modul dreimal 503 liefert, wird nicht mehr gefragt.
