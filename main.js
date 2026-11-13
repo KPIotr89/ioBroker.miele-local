@@ -3928,6 +3928,17 @@ class MieleLocal extends utils.Adapter {
             ergebnis = { status: `Fehler: ${e.message}`.slice(0, 60) };
         }
 
+        if (leafscan.beschaeftigt(ergebnis) && wach) {
+            // Wach und in Ruhe, und trotzdem 503: liegt an der Adresse - vermerken, weiterziehen.
+            z.bisher = leafscan.einordnen(z.bisher, unit, attr, ergebnis, {
+                wach,
+                jetzt: Date.now(),
+                besetztJeAdresse: true,
+            });
+            z.ungespeichert++;
+            this.log.debug(`${deviceId}: leaf scan - ${unit}/${attr} busy (503) although awake, retried later`);
+            return 'gefragt';
+        }
         if (leafscan.beschaeftigt(ergebnis)) {
             // "Gerade nicht" - keine Auskunft ueber die Adresse, nur ueber das Modul.
             z.wachBis = 0;

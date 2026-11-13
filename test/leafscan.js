@@ -134,6 +134,18 @@ describe('Leaf-Scan: langsamer Planer - Absagen einordnen', () => {
         expect(erg['14/1570'].antwortet).to.equal(false);
     });
 
+    it('vermerkt 503 bei wachem Modul an der Adresse und laesst sie nach drei Mal liegen', () => {
+        // Backofen 13.11.2026: 14/1566-1569 404, 14/1570 503 - der Scan darf dort nicht haengen.
+        let erg = {};
+        for (let i = 0; i < ls.STOERUNGEN_JE_ADRESSE; i++) {
+            erg = ls.einordnen(erg, 14, 1570, { status: 503 }, { wach: true, jetzt: T + i, besetztJeAdresse: true });
+        }
+        expect(ls.endgueltig(erg['14/1570'])).to.equal(true);
+        const b = [{ unit: 14, von: 1570, bis: 1571 }];
+        const eins = ls.einordnen({}, 14, 1570, { status: 503 }, { wach: true, jetzt: T, besetztJeAdresse: true });
+        expect(ls.naechsteAdresse(eins, T + 1000, b)).to.deep.equal({ unit: 14, attr: 1571 });
+    });
+
     it('legt fuer 503 nichts ab', () => {
         // Der Planer behandelt 503 vorher; einordnen darf es trotzdem nicht als Absage zaehlen.
         const erg = ls.einordnen({}, 2, 1, { status: 503 }, { wach: true, jetzt: T });
