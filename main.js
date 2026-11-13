@@ -3868,7 +3868,9 @@ class MieleLocal extends utils.Adapter {
             const k = await this.kontrollfrage(deviceId);
             if (k === 'wach') {
                 z.wachBis = Date.now() + leafscan.WACH_GUELTIG_MS;
-                z.fehler = 0;
+                if (leafscan.fehlerVerzeihen(z.schonBis, Date.now())) {
+                    z.fehler = 0;
+                }
                 if (z.warum) {
                     z.warum = '';
                     await this.scanStandMelden(deviceId);
@@ -3961,7 +3963,9 @@ class MieleLocal extends utils.Adapter {
             await warten(`paused until ${uhr(z.pauseBis)} after ${z.fehler} connection error(s)`);
             return 'gefragt';
         }
-        z.fehler = 0;
+        if (leafscan.fehlerVerzeihen(z.schonBis, Date.now())) {
+            z.fehler = 0;
+        }
 
         const neu = z.bisher[leafscan.schluessel(unit, attr)];
         const st = Number(ergebnis.status);

@@ -165,6 +165,14 @@ describe('Leaf-Scan: langsamer Planer - Tempo und Schutz', () => {
         expect(ls.rueckzugMs(9)).to.equal(30 * 60000);
     });
 
+    it('verzeiht Stoerungen erst nach einer stoerungsfreien Schonphase, nicht nach einer guten Antwort', () => {
+        const jetzt = 1e12;
+        expect(ls.fehlerVerzeihen(undefined, jetzt)).to.equal(true);
+        expect(ls.fehlerVerzeihen(0, jetzt)).to.equal(true);
+        expect(ls.fehlerVerzeihen(jetzt + 60000, jetzt)).to.equal(false);
+        expect(ls.fehlerVerzeihen(jetzt - 1, jetzt)).to.equal(true);
+    });
+
     it('scannt nicht bei gewaehltem, pausiertem, gestoertem oder unbekanntem Zustand', () => {
         for (const st of [3, 4, 6, 8, 9, 255, null]) {
             expect(ls.scanErlaubt({ status: st, seitMs: 3600000, verbunden: true }), String(st)).to.equal(false);

@@ -56,7 +56,9 @@ die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
   404 = wach; 500/503 = schläft → 10 min Ruhe).
 - **Rückzug bei Störungen** (Timeout, Verbindung abgelehnt/abgebrochen): 5, 10, 20, 30 min
   Pause für dieses Gerät, danach eine Stunde Schonphase mit höchstens einer Anfrage pro Minute
-  (Backofen H2469BP: Timeouts nach ~10 Adressen im 25-s-Takt, /State lief weiter). Eine Adresse,
+  (Backofen H2469BP: Timeouts nach ~10 Adressen im 25-s-Takt, /State lief weiter). Die Stufe
+  sinkt erst wieder, wenn die Schonphase ohne neue Störung abgelaufen ist – eine einzelne gute
+  Antwort reicht nicht (sonst pendelt der Rückzug zwischen 5 und 10 min). Eine Adresse,
   die dreimal stört oder bei wachem Modul dreimal 503 liefert, wird nicht mehr gefragt.
 - **Absagen gelten erst nach Bestätigung:** 404/500 zählen nur, wenn das Modul kurz vorher
   (5 min) bewiesen hat, dass es unterscheidet, und erst **zwei solche Antworten im Abstand von
