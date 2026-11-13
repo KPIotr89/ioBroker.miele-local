@@ -31,24 +31,6 @@ const datenpunkte = require('./lib/datenpunkte');
 const { MieleZeitdienst } = require('./lib/zeitdienst');
 const uhrzeit = require('./lib/uhrzeit');
 
-/**
- * Verschnaufpause zwischen zwei Scan-Durchgaengen.
- *
- * Eine Minute. Ein Durchgang sind vierzig Anfragen am Stueck; danach gehoert das Modul wieder
- * sich selbst, bevor der naechste Schwung kommt.
- */
-const PAUSE_ZWISCHEN_DURCHGAENGEN_MS = 60000;
-/**
- * Nach einem Abbruch wegen Verbindungsstoerungen - siehe leafScanDauerlauf.
- *
- * EINE Minute - so lange braucht das Modul, um wieder ansprechbar zu sein, und keine Sekunde
- * laenger. Zwischenzeitlich standen hier zwanzig Minuten; das war zweimal falsch gedacht:
- * Erstens ist die eigentliche Stellschraube gegen Ueberlastung die Pause ZWISCHEN den
- * Anfragen (leafscan.PAUSE_MS, seit 07.09.2026 fuenf Sekunden), zweitens wartet ein Scan,
- * der bei jedem Aussetzer minutenlang blockiert, am Ende laenger als er scannt - und wird
- * ueber 882 Adressen nie fertig. Ein Modul, das wieder kann, soll auch wieder gefragt werden.
- */
-const PAUSE_NACH_UEBERLASTUNG_MS = 60000;
 const { MielePushListener } = require('./lib/push');
 const enroll = require('./lib/enroll');
 const dop2 = require('./lib/dop2');
@@ -193,7 +175,7 @@ const FEIN_TAKT_MS = 20000;
 /** Darueber hinaus lohnt es nicht - die normale Runde laeuft ohnehin alle drei Minuten. */
 const FEIN_TAKT_MAX_MS = 120000;
 /**
- * Die Adresse fuer die Kontrollfrage vor jedem Scan-Durchgang - siehe gespraechsbereit.
+ * Die Adresse fuer die Kontrollfrage des Leaf-Scans - siehe kontrollfrage.
  *
  * 2/1583 liegt in der Umgebung der Benutzeranfrage - dem einzigen Bereich, in dem BEIDE
  * bekannten Geraete ueberhaupt differenziert antworten: die Waschmaschine mit einem Treffer,
@@ -216,9 +198,8 @@ const KONTROLL_ADRESSE = [2, 1583];
  * Grund ein Fehlgriff. Ein Geraet, das die Adresse nicht kennt, wuerde also nie gescannt.
  *
  * Deshalb: Hat ein Geraet die Kontrollfrage noch NIE beantwortet und ist es eingeschaltet,
- * wird nach zehn Anlaeufen - rund zehn Minuten - trotzdem ein Durchgang gewagt. Der Durchgang
- * schuetzt sich selbst: Haeufen sich Abbrueche, endet er von allein und der Dauerlauf legt
- * eine lange Pause ein. Sobald die Kontrollfrage einmal geantwortet hat, gilt sie fuer dieses
+ * wird nach zehn Anlaeufen trotzdem gescannt. Der Scan schuetzt sich selbst: Jede Stoerung
+ * schickt das Geraet in eine wachsende Pause (leafscan.rueckzugMs). Sobald die Kontrollfrage einmal geantwortet hat, gilt sie fuer dieses
  * Geraet und der Rueckfall entfaellt.
  */
 const KONTROLLE_TAUB_MAX = 10;
@@ -3162,7 +3143,7 @@ class MieleLocal extends utils.Adapter {
              *
              * ROLLE "switch", NICHT "button". Ein Knopf loest aus und faellt zurueck; dieser
              * Schalter BLEIBT stehen, solange die Suche laeuft, und der Dauerlauf fragt ihn bei
-             * jedem Durchgang ab (leafScanDauerlauf). Umlegen heisst also "suchen, bis fertig",
+             * jedem Schritt ab (scanSchritt). Umlegen heisst also "suchen, bis fertig",
              * nicht "einen Durchgang ausloesen".
              *
              * Die Objektpruefung des Aufnahmeantrags hat das am 19.09.2026 aufgedeckt: Ein
@@ -3670,65 +3651,44 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
-     * Einen Durchgang des Leaf-Scans fahren.
+     * Die Kontrollfrage: Gibt das Modul gerade Auskunft?
      *
-     * WARUM IN DURCHGAENGEN. Der volle Suchraum sind rund 700 Adressen; bei 700 ms Pause
-     * waeren das acht Minuten am Stueck, in denen das Geraet nichts anderes tut. Ein
-     * Durchgang nimmt sich deshalb nur ein Stueck vor und merkt sich, wo er stand - beim
-     * naechsten Anstossen geht es dort weiter. Ein Abbruch mittendrin kostet nichts.
-     *
-     * WAS DABEI HERAUSKOMMT. Je Adresse wird festgehalten, ob sie antwortet und mit welchen
-     * Feldern. Der Sinn liegt im VERGLEICH zweier Durchlaeufe: einer im Leerlauf, einer
-     * waehrend eines Programms. Die Felder, die sich dazwischen bewegen, sind die
-     * Kandidaten fuer alles, was heute noch fehlt - allen voran die verbrauchte Energie,
-     * die im bekannten Leaf 2/6195 nachweislich nicht steht (04.09.2026, alle 47 Felder in
-     * vier Ableitungen gegen die Shelly-Messung geprueft, bestes Feld 51 % daneben).
-     */
-    /**
-     * Gibt das Modul ueberhaupt Auskunft? Eine einzige Frage klaert das.
-     *
-     * WARUM NICHT AM STATUS. Erst haben wir das am Geraetestatus festgemacht: nur scannen,
-     * wenn "Standby". Das war zu grob - der Status sagt nichts darueber, ob das Modul gerade
-     * Kapazitaet hat. Eine Spuelmaschine im Trocknen steht auf "In Betrieb" und tut dabei
-     * nichts als warten (17 W); sie ist der beste Gespraechspartner, den es gibt. Umgekehrt
-     * gibt es Geraete, die nach dem Programm sofort abschalten und nie einen Leerlauf zeigen,
-     * in dem gescannt werden koennte.
-     *
-     * WIE ES STATTDESSEN GEHT. Gefragt wird eine Adresse, die es nicht gibt. Ein
-     * gespraechsbereites Modul beantwortet sie mit 404 - "kenne ich nicht" ist eine Auskunft.
-     * Ein ausgelastetes Modul antwortet auf ALLES mit 500 oder gar nicht. Damit ist die
-     * Unterscheidung gemessen statt geraten, und zwar mit genau einer Anfrage je Durchgang.
-     *
-     * Antwortet die Adresse mit 200, existiert sie bei diesem Modell eben doch - auch das
-     * heisst "gespraechsbereit". Nur 500 und Stoerungen sprechen dagegen.
+     * WARUM NICHT AM STATUS. Der Status sagt nichts darueber, ob das Modul Kapazitaet hat; ein
+     * ausgeschaltetes Geraet kann ein waches Modul haben und umgekehrt. Gefragt wird deshalb eine
+     * Adresse, deren Antwort bekannt ist: Ein gespraechsbereites Modul antwortet mit Daten oder
+     * 404 - "kenne ich nicht" ist eine Auskunft. Ein schlafendes oder ausgelastetes Modul
+     * antwortet auf ALLES mit 500.
      *
      * @param deviceId Geraete-ID
+     * @returns {Promise<'wach'|'schlaeft'|'stoerung'|'unbekannt'>} 'unbekannt' heisst: Das Geraet
+     *          hat die Kontrolladresse nie beantwortet, es wird trotzdem versucht (siehe
+     *          leafscan.trotzdemVersuchen).
      */
-    async gespraechsbereit(deviceId) {
+    async kontrollfrage(deviceId) {
         const dev = this.devices && this.devices[deviceId];
         if (!dev) {
-            return false;
+            return 'stoerung';
         }
         this._kontrollTaub = this._kontrollTaub || {};
         this._kontrollKennt = this._kontrollKennt || {};
         const [unit, attr] = KONTROLL_ADRESSE;
         try {
-            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_MS);
+            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_LANGSAM_MS);
+            if (res.status === 503) {
+                return 'schlaeft';
+            }
             if (res.status !== 500) {
-                // Das Geraet kennt den Bereich und gibt Auskunft.
                 this._kontrollKennt[deviceId] = true;
                 this._kontrollTaub[deviceId] = 0;
-                return true;
+                return 'wach';
             }
         } catch (e) {
             this.log.debug(`${deviceId}: control request ${unit}/${attr} - ${e.message}`);
+            return 'stoerung';
         }
-
-        // Ein Geraet, das die Kontrolladresse kennt, ist jetzt eben beschaeftigt.
         if (this._kontrollKennt[deviceId]) {
-            return false;
+            return 'schlaeft';
         }
-
         this._kontrollTaub[deviceId] = (this._kontrollTaub[deviceId] || 0) + 1;
         if (
             !leafscan.trotzdemVersuchen({
@@ -3737,183 +3697,294 @@ class MieleLocal extends utils.Adapter {
                 grenze: KONTROLLE_TAUB_MAX,
             })
         ) {
-            return false;
+            return 'schlaeft';
         }
-
         if (this._kontrollTaub[deviceId] === KONTROLLE_TAUB_MAX) {
             this.log.info(
                 `${deviceId}: control address ${unit}/${attr} did not answer ${KONTROLLE_TAUB_MAX} times ` +
-                    '- this model apparently does not know the range. The scan is ' +
-                    'tried anyway and stops by itself if the appliance refuses.',
+                    '- this model apparently does not know the range. The scan is tried anyway; ' +
+                    'a 500 then only counts once the module has proven it is awake.',
             );
         }
-        return true;
-    }
-
-    async leafScanDurchgang(deviceId) {
-        const dev = this.devices && this.devices[deviceId];
-        if (!dev) {
-            this.log.warn(`Leaf scan: ${deviceId} is not connected`);
-            return;
-        }
-        // erzwingen: Der Scan ist selbst eine Diagnosefunktion und braucht den Kanal.
-        await this.ensureSammlungObjects(deviceId, true);
-
-        let bisher = {};
-        try {
-            const s = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
-            bisher = JSON.parse((s && s.val) || '{}') || {};
-        } catch {
-            bisher = {};
-        }
-
-        const offen = leafscan.naechste(bisher);
-        if (!offen.length) {
-            const f = leafscan.fortschritt(bisher);
-            this.log.info(`${deviceId}: leaf scan finished - ${f.text}`);
-            await this.setStateAsync(ids.s(deviceId, 'scanState'), { val: f.text, ack: true });
-            return;
-        }
-        this.log.info(
-            `${deviceId}: leaf scan - ${offen.length} addresses in this pass ` +
-                `(${leafscan.fortschritt(bisher).text})`,
-        );
-        let geprueft = 0;
-        let stoerungen = 0;
-        let absagen = 0;
-        let ueberlastet = false;
-
-        for (const { unit, attr } of offen) {
-            let ergebnis = { status: null };
-            try {
-                const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_MS);
-                if (res.status === 200 && res.headers['x-signature']) {
-                    /*
-                     * Eine Antwort, die sich nicht dekodieren laesst, ist trotzdem eine Antwort.
-                     *
-                     * Bis 0.5.2 landete ein Parse-Fehler ("Unknown DOP2 field type 33") als
-                     * Text im Status - und Text zaehlt in leafscan.beantwortet nicht. Die Adresse
-                     * blieb offen, wurde in jedem Durchgang neu gefragt, und der Scan wurde nie
-                     * fertig. Jetzt: Status 200, Fehlertext daneben, Rohdaten zur Auswertung.
-                     */
-                    try {
-                        ergebnis = { felder: this.leafFelder(res) };
-                    } catch (e) {
-                        const roh = this.leafRoh(res);
-                        ergebnis = { status: 200, fehler: e.message, roh };
-                        this.log.debug(`${this.kennung(deviceId)}: ${unit}/${attr} answers, but ${e.message}`);
-                    }
-                } else {
-                    ergebnis = { status: res.status };
-                }
-            } catch (e) {
-                // Ein Lesefehler ist ein Ergebnis wie jedes andere: Die Adresse gilt als
-                // geprueft, sonst haengt der Scan ewig an derselben Stelle.
-                ergebnis = { status: `Fehler: ${e.message}`.slice(0, 60) };
-            }
-            /*
-             * Nur festhalten, was das Geraet WIRKLICH beantwortet hat.
-             *
-             * Ein 503 oder ein abgebrochener Socket ist keine Auskunft ueber die Adresse,
-             * sondern ueber den Zustand des Moduls. Wer ihn als Ergebnis ablegt, hakt eine
-             * Adresse ab, die nie gefragt wurde - siehe leafscan.beantwortet.
-             */
-            if (leafscan.beantwortet(ergebnis)) {
-                bisher = leafscan.aufnehmen(bisher, unit, attr, ergebnis);
-            }
-
-            /*
-             * Aufhoeren, bevor das Modul aufgibt.
-             *
-             * Am 04.09.2026 warf die Waschmaschine nach rund 170 Adressen ihre Verbindung
-             * ab - lokal und zur Cloud, und beide kamen von selbst nicht zurueck. Die
-             * Vorboten standen im Ergebnis: abgebrochene Sockets und Zeitueberschreitungen
-             * zwischen ansonsten sauberen Absagen. Genau die zaehlt dieser Zaehler.
-             */
-            if (leafscan.beschaeftigt(ergebnis)) {
-                /*
-                 * "Gerade nicht" ist keine Niederlage.
-                 *
-                 * Waehrend eines Programms beantwortet das Modul fast jede Frage mit 503 -
-                 * frueher brach der Durchgang danach ab, und der Scan kam ueber 23 von 882
-                 * Adressen nicht hinaus. Jetzt wird gewartet, immer laenger, und dieselbe
-                 * Adresse noch einmal gefragt. Der Zaehler steht still: Ein beschaeftigtes
-                 * Geraet ist kein ueberlastetes.
-                 */
-                if (++absagen <= leafscan.ABSAGEN_JE_ADRESSE) {
-                    const warten = leafscan.wartezeitMs(absagen);
-                    this.log.debug(
-                        `${deviceId}: ${unit}/${attr} is busy - ` + `waiting ${warten / 1000}s and asking again`,
-                    );
-                    await new Promise(r => this.setTimeout(r, warten));
-                    continue; // dieselbe Adresse noch einmal
-                }
-                // Nach mehreren Anlaeufen weiterziehen - die Adresse bleibt offen.
-                this.log.info(`${deviceId}: ${unit}/${attr} stays busy, ` + 'trying again later');
-                absagen = 0;
-                stoerungen = 0;
-                continue;
-            }
-            absagen = 0;
-
-            if (leafscan.ueberlastet(ergebnis)) {
-                if (++stoerungen >= leafscan.ABBRUCH_FEHLER) {
-                    /*
-                     * INFO, NICHT WARN. Ein ueberlastetes Modul ist hier der Normalfall, kein
-                     * Fehler: Waehrend eines Programms kommt es mit den vielen Leaf-Anfragen nicht
-                     * mit, und der Scan setzt spaeter ab dem gesicherten Fortschritt fort. Als
-                     * Warnung stand diese Zeile vom 05. bis 11.09.2026 271-mal im Log, ohne dass
-                     * je etwas zu tun gewesen waere - und verdeckte damit echte Warnungen.
-                     */
-                    this.log.info(
-                        `${deviceId}: leaf scan aborted - ${stoerungen} ` +
-                            'connection errors in a row. The appliance cannot keep up; ' +
-                            'continuing later, the progress is saved.',
-                    );
-                    ueberlastet = true;
-                    break;
-                }
-            } else {
-                stoerungen = 0;
-            }
-
-            // Zwischenspeichern, damit ein Abbruch nicht den ganzen Durchgang kostet.
-            if (++geprueft % leafscan.SICHERN_ALLE === 0) {
-                await this.scanErgebnisSchreiben(deviceId, bisher);
-                await this.setStateAsync(ids.s(deviceId, 'scanState'), {
-                    val: leafscan.fortschritt(bisher).text,
-                    ack: true,
-                });
-            }
-            // Dem Geraet Luft lassen - es bedient immer nur eine Verbindung.
-            await new Promise(r => this.setTimeout(r, leafscan.PAUSE_MS));
-        }
-
-        await this.scanErgebnisSchreiben(deviceId, bisher);
-        const f = leafscan.fortschritt(bisher);
-        await this.setStateAsync(ids.s(deviceId, 'scanState'), { val: f.text, ack: true });
-        const t = leafscan
-            .treffer(bisher)
-            .slice(0, 12)
-            .map(x => `${x.leaf} (${x.felder} fields)`)
-            .join(', ');
-        this.log.info(`${deviceId}: leaf scan - ${f.text}${t ? `. So far: ${t}` : ''}`);
-        return { ueberlastet };
+        return 'unbekannt';
     }
 
     /**
-     * Durchgang um Durchgang, bis der Scan fertig ist.
+     * Den langsamen Leaf-Scan anwerfen, falls er nicht schon laeuft - siehe lib/leafscan.js.
      *
-     * WANN ER LAEUFT: solange der Schalter `sammlung.leafScan` steht. Der Nutzer legt ihn um,
-     * wenn Zeit ist - typisch nach einem Programm, wenn das Geraet noch wach im Leerlauf steht
-     * und stundenlang nichts anderes zu tun hat. Ein Adapterneustart beendet den Dauerlauf; der
-     * Fortschritt ist gesichert, und ein erneutes Umlegen macht dort weiter, wo er stand.
-     *
-     * WARUM DIE PAUSE DAZWISCHEN so viel groesser ist als die zwischen zwei Adressen: Ein
-     * Durchgang sind vierzig Anfragen am Stueck. Danach bekommt das Modul eine Minute fuer
-     * sich - Zeit genug, um Cloud, App und die eigene Steuerung zu bedienen, bevor der naechste
-     * Schwung kommt. Am 04.09.2026 hatte es ohne solche Pausen die Verbindung abgeworfen.
+     * EIN Planer fuer alle Geraete: Er fragt reihum hoechstens eine Adresse je leafscan.TAKT_MS,
+     * nie zwei Geraete gleichzeitig. Er endet von selbst, sobald kein Scan-Schalter mehr steht.
      */
+    scanPlanerStarten() {
+        if (this._scanPlanerLaeuft || this.stopping) {
+            return;
+        }
+        this._scanPlanerLaeuft = true;
+        this.scanPlaner()
+            .catch(e => this.log.warn(`Leaf scan planner failed - ${e.message}`))
+            .finally(() => {
+                this._scanPlanerLaeuft = false;
+            });
+    }
+
+    async scanPlaner() {
+        this._scan = this._scan || {};
+        let reihe = 0;
+        this.log.info(
+            `Leaf scan (slow): at most one request every ${leafscan.TAKT_MS / 1000} s across all appliances, ` +
+                'only while no programme runs and the module answers',
+        );
+        while (!this.stopping) {
+            const aktiv = [];
+            for (const deviceId of Object.keys(this.devices || {})) {
+                const st = await this.getStateAsync(ids.s(deviceId, 'scan'));
+                if (st && st.val === true) {
+                    aktiv.push(deviceId);
+                } else if (this._scan[deviceId]) {
+                    // Abgeschaltet: Ungesichertes sichern und den Zwischenstand vergessen - beim
+                    // naechsten Einschalten wird frisch aus dem Datenpunkt gelesen.
+                    await this.scanSichern(deviceId, true);
+                    delete this._scan[deviceId];
+                    this.log.info(`${deviceId}: leaf scan stopped.`);
+                }
+            }
+            if (!aktiv.length) {
+                this.log.info('Leaf scan planner idle - no appliance has the scan switched on');
+                return;
+            }
+            let gefragt = false;
+            for (let i = 0; i < aktiv.length && !gefragt && !this.stopping; i++) {
+                const deviceId = aktiv[(reihe + i) % aktiv.length];
+                try {
+                    gefragt = (await this.scanSchritt(deviceId)) === 'gefragt';
+                } catch (e) {
+                    this.log.warn(`${deviceId}: leaf scan step failed - ${e.message}`);
+                }
+                if (gefragt) {
+                    reihe = (reihe + i + 1) % aktiv.length;
+                }
+            }
+            // Nach einer Anfrage der Takt, sonst eine Minute bis zum naechsten Blick.
+            await new Promise(r => this.setTimeout(r, gefragt ? leafscan.TAKT_MS : 60000));
+        }
+    }
+
+    /**
+     * Den Scan-Zwischenstand eines Geraets sichern (scanJson, scanJsonAnonym, scanState).
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {boolean} [nurWennNoetig] nur schreiben, wenn seit dem letzten Mal etwas dazukam
+     */
+    async scanSichern(deviceId, nurWennNoetig = false) {
+        const z = this._scan && this._scan[deviceId];
+        if (!z || !z.bisher || (nurWennNoetig && !z.ungespeichert)) {
+            return;
+        }
+        await this.scanErgebnisSchreiben(deviceId, z.bisher);
+        z.ungespeichert = 0;
+        await this.scanStandMelden(deviceId);
+    }
+
+    /**
+     * collection.scanState schreiben: Fortschritt und, wenn der Scan gerade wartet, warum.
+     *
+     * @param {string} deviceId Geraete-ID
+     */
+    async scanStandMelden(deviceId) {
+        const z = this._scan && this._scan[deviceId];
+        if (!z || !z.bisher) {
+            return;
+        }
+        let text = leafscan.fortschritt(z.bisher).text;
+        if (z.warum) {
+            text += ` - ${z.warum}`;
+        }
+        await this.setStateChangedAsync(ids.s(deviceId, 'scanState'), { val: text, ack: true });
+    }
+
+    /**
+     * Ein Schritt des langsamen Scans fuer ein Geraet: hoechstens EINE Anfrage.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @returns {Promise<'gefragt'|'warten'>} 'gefragt', wenn eine Anfrage an das Geraet ging
+     */
+    async scanSchritt(deviceId) {
+        const dev = this.devices && this.devices[deviceId];
+        if (!dev) {
+            return 'warten';
+        }
+        const jetzt = Date.now();
+        let z = this._scan[deviceId];
+        if (!z) {
+            await this.ensureSammlungObjects(deviceId, true);
+            let bisher = {};
+            try {
+                const s = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
+                bisher = JSON.parse((s && s.val) || '{}') || {};
+            } catch {
+                bisher = {};
+            }
+            z = this._scan[deviceId] = { bisher, pauseBis: 0, fehler: 0, wachBis: 0, ungespeichert: 0, warum: '' };
+            this.log.info(`${deviceId}: leaf scan running - ${leafscan.fortschritt(bisher).text}`);
+        }
+        const warten = async warum => {
+            if (z.warum !== warum) {
+                z.warum = warum;
+                await this.scanSichern(deviceId);
+            }
+            return 'warten';
+        };
+        const uhr = t => new Date(t).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        if (z.pauseBis > jetzt) {
+            return 'warten';
+        }
+
+        /*
+         * Kein Programm, Status seit einer Weile ruhig, normale Abfrage erreicht das Geraet.
+         * Waehrend einer Feinaufzeichnung bleibt das Modul ebenfalls in Ruhe.
+         */
+        const status = await this.getStateAsync(`${deviceId}.state.status`);
+        const erlaubt = leafscan.scanErlaubt({
+            status: status && status.val,
+            seitMs: status ? jetzt - (status.lc || status.ts || jetzt) : 0,
+            verbunden: dev.erreichbar !== false,
+        });
+        if (!erlaubt || (this.feinTimer && this.feinTimer[deviceId])) {
+            z.wachBis = 0;
+            return warten(`waiting: programme running, just finished or appliance not reachable`);
+        }
+
+        // Ist das Modul wach? Ein Beleg gilt WACH_GUELTIG_MS; danach erst die Kontrollfrage.
+        if (z.wachBis <= jetzt && !z.ohneKontrolle) {
+            const k = await this.kontrollfrage(deviceId);
+            if (k === 'wach') {
+                z.wachBis = Date.now() + leafscan.WACH_GUELTIG_MS;
+                z.fehler = 0;
+                if (z.warum) {
+                    z.warum = '';
+                    await this.scanStandMelden(deviceId);
+                }
+            } else if (k === 'unbekannt') {
+                z.ohneKontrolle = true;
+            } else if (k === 'schlaeft') {
+                z.pauseBis = Date.now() + leafscan.RUHE_MS;
+                this.log.debug(
+                    `${deviceId}: leaf scan - module not talking (control 500/503), next try ${uhr(z.pauseBis)}`,
+                );
+                await warten(`waiting: module asleep, next try ${uhr(z.pauseBis)}`);
+            } else {
+                this.scanRueckzug(deviceId, z, 'control request failed');
+                await warten(`paused until ${uhr(z.pauseBis)} after ${z.fehler} connection error(s)`);
+            }
+            return 'gefragt';
+        }
+
+        const adr = leafscan.naechsteAdresse(z.bisher, jetzt);
+        if (!adr) {
+            const f = leafscan.fortschritt(z.bisher);
+            if (!f.offen) {
+                z.warum = '';
+                await this.scanSichern(deviceId);
+                this.log.info(`${deviceId}: leaf scan finished - ${f.text}`);
+                await this.setStateAsync(ids.s(deviceId, 'scan'), { val: false, ack: true });
+                delete this._scan[deviceId];
+                return 'warten';
+            }
+            z.pauseBis = jetzt + 15 * 60000;
+            return warten(`waiting: remaining addresses are due for confirmation later`);
+        }
+
+        const { unit, attr } = adr;
+        const wach = z.wachBis > jetzt;
+        let ergebnis;
+        try {
+            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_LANGSAM_MS);
+            if (res.status === 200 && res.headers['x-signature']) {
+                /*
+                 * Eine Antwort, die sich nicht dekodieren laesst, ist trotzdem eine Antwort -
+                 * Status 200, Fehlertext daneben, Rohdaten zur spaeteren Auswertung. Ein leeres
+                 * Leaf ebenso: Die Adresse gibt es.
+                 */
+                try {
+                    const felderGelesen = this.leafFelder(res);
+                    ergebnis =
+                        felderGelesen && Object.keys(felderGelesen).length
+                            ? { felder: felderGelesen }
+                            : { status: 200, fehler: 'empty leaf', roh: this.leafRoh(res) };
+                } catch (e) {
+                    ergebnis = { status: 200, fehler: e.message, roh: this.leafRoh(res) };
+                    this.log.debug(`${this.kennung(deviceId)}: ${unit}/${attr} answers, but ${e.message}`);
+                }
+            } else {
+                ergebnis = { status: res.status };
+            }
+        } catch (e) {
+            ergebnis = { status: `Fehler: ${e.message}`.slice(0, 60) };
+        }
+
+        if (leafscan.beschaeftigt(ergebnis)) {
+            // "Gerade nicht" - keine Auskunft ueber die Adresse, nur ueber das Modul.
+            z.wachBis = 0;
+            z.pauseBis = Date.now() + leafscan.RUHE_MS;
+            this.log.debug(`${deviceId}: leaf scan - ${unit}/${attr} busy (503), next try ${uhr(z.pauseBis)}`);
+            await warten(`waiting: module busy, next try ${uhr(z.pauseBis)}`);
+            return 'gefragt';
+        }
+
+        const vorher = z.bisher[leafscan.schluessel(unit, attr)];
+        z.bisher = leafscan.einordnen(z.bisher, unit, attr, ergebnis, { wach, jetzt: Date.now() });
+        z.ungespeichert++;
+
+        if (leafscan.ueberlastet(ergebnis)) {
+            this.scanRueckzug(deviceId, z, `${unit}/${attr}: ${String(ergebnis.status).replace(/^Fehler: /, '')}`);
+            await warten(`paused until ${uhr(z.pauseBis)} after ${z.fehler} connection error(s)`);
+            return 'gefragt';
+        }
+        z.fehler = 0;
+
+        const neu = z.bisher[leafscan.schluessel(unit, attr)];
+        const st = Number(ergebnis.status);
+        if (neu.antwortet || st === 404 || st === 101) {
+            // Das Modul unterscheidet - es ist wach.
+            z.wachBis = Date.now() + leafscan.WACH_GUELTIG_MS;
+        }
+        if (neu.antwortet) {
+            const umfang = neu.anzahl ? ` with ${neu.anzahl} fields` : ` (${neu.fehler})`;
+            const frueher = vorher && !vorher.antwortet ? ` (before: ${vorher.status})` : '';
+            this.log.info(`${deviceId}: leaf scan - ${unit}/${attr} answers${umfang}${frueher}`);
+            await this.scanSichern(deviceId);
+        } else {
+            this.log.debug(
+                `${deviceId}: leaf scan - ${unit}/${attr} status ${neu.status}, ` +
+                    `confirmed ${leafscan.bestaetigungen(neu)}x${wach ? '' : ' (no awake proof)'}`,
+            );
+            if (z.ungespeichert >= 10) {
+                await this.scanSichern(deviceId);
+            }
+        }
+        return 'gefragt';
+    }
+
+    /**
+     * Rueckzug nach einer Stoerung: 5, 10, 20, 30 Minuten Ruhe fuer dieses Geraet.
+     *
+     * Am 13.11.2026 lehnte die Waschmaschine waehrend des Scans Verbindungen ab, die Spuelmaschine
+     * war eine Minute ganz weg. Wer dann weiterfragt, macht es schlimmer.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {object} z Scan-Zustand des Geraets
+     * @param {string} grund was schiefging
+     */
+    scanRueckzug(deviceId, z, grund) {
+        z.fehler++;
+        z.wachBis = 0;
+        const pause = leafscan.rueckzugMs(z.fehler);
+        z.pauseBis = Date.now() + pause;
+        this.log.info(
+            `${deviceId}: leaf scan pausing ${pause / 60000} min after connection error ${z.fehler} in a row (${grund})`,
+        );
+    }
+
     /**
      * Eine Runde ueber alle Geraete, die gerade arbeiten.
      *
@@ -4332,7 +4403,7 @@ class MieleLocal extends utils.Adapter {
                 continue;
             }
             this.log.info(`${deviceId}: leaf scan resumed after restart`);
-            this.leafScanDauerlauf(deviceId).catch(e => this.log.warn(`${deviceId}: leaf scan failed - ${e.message}`));
+            this.scanPlanerStarten();
         }
     }
 
@@ -4508,86 +4579,7 @@ class MieleLocal extends utils.Adapter {
         );
         await this.ensureSammlungObjects(deviceId, true);
         await this.setStateAsync(ids.s(deviceId, 'scan'), { val: true, ack: true });
-        this.leafScanDauerlauf(deviceId).catch(e => this.log.warn(`${deviceId}: leaf scan failed - ${e.message}`));
-    }
-
-    async leafScanDauerlauf(deviceId) {
-        for (;;) {
-            const laeuft = await this.getStateAsync(ids.s(deviceId, 'scan'));
-            if (!laeuft || laeuft.val !== true) {
-                this.log.info(`${deviceId}: leaf scan stopped.`);
-                return;
-            }
-
-            /*
-             * Ein ausgeschaltetes Geraet nicht befragen - es antwortet auf ALLES mit 500.
-             *
-             * Das ist die teuerste Falle des ganzen Verfahrens: Diese 500er sehen aus wie
-             * "gibt es nicht" und werden als geprueft abgelegt. Ein Scan, der am schlafenden
-             * Geraet durchlaeuft, meldet danach "882 von 882 geprueft" und hat in Wahrheit
-             * keine einzige Adresse ernsthaft gefragt.
-             *
-             * Am 06.09.2026 an der Spuelmaschine G5840 genau so geschehen: 875 Adressen mit
-             * 500 abgehakt, ein einziger Treffer - waehrend die baugleich angebundene
-             * Waschmaschine zehn Leafs lieferte.
-             *
-             * EIN LAUFENDES PROGRAMM IST GENAUSO SCHLECHT. Das war zuerst uebersehen: Am
-             * 07.09.2026 lief der Scan an der arbeitenden Spuelmaschine und lieferte 102
-             * Adressen, davon 102 mit 500 - ausnahmslos, ohne ein einziges 404 dazwischen.
-             * Ein Geraet, das wirklich antwortet, unterscheidet (die Waschmaschine lieferte
-             * 500er UND 404er UND Treffer). Zur selben Zeit beantwortete die ebenfalls
-             * arbeitende Waschmaschine Anfragen auf ein Leaf, das sie nachweislich hat, nur
-             * noch mit Timeouts. Waehrend eines Programms hat das Modul schlicht keine
-             * Kapazitaet, und seine Absagen bedeuten nichts.
-             *
-             * Gescannt wird deshalb nur im Leerlauf: Status 7 heisst "Standby" und ist der
-             * beste Zeitpunkt ueberhaupt, 1 heisst "aus". Alles dazwischen heisst, dass ein
-             * Programm laeuft.
-             */
-            const zustand = await this.getStateAsync(`${deviceId}.state.status`);
-            if (zustand && Number(zustand.val) === 1) {
-                this.log.debug(`${deviceId}: leaf scan waiting - appliance is off`);
-                await new Promise(r => this.setTimeout(r, PAUSE_ZWISCHEN_DURCHGAENGEN_MS));
-                continue;
-            }
-            if (!(await this.gespraechsbereit(deviceId))) {
-                this.log.debug(`${deviceId}: leaf scan waiting - module does not answer`);
-                await new Promise(r => this.setTimeout(r, PAUSE_ZWISCHEN_DURCHGAENGEN_MS));
-                continue;
-            }
-
-            const vorher = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
-            let stand = {};
-            try {
-                stand = JSON.parse((vorher && vorher.val) || '{}') || {};
-            } catch {
-                stand = {};
-            }
-            if (!leafscan.naechste(stand, 1).length) {
-                this.log.info(`${deviceId}: leaf scan finished - nothing left to scan.`);
-                await this.setStateAsync(ids.s(deviceId, 'scan'), { val: false, ack: true });
-                return;
-            }
-
-            const lauf = await this.leafScanDurchgang(deviceId);
-            /*
-             * Nach einer Ueberlastung nicht nach einer Minute wieder anklopfen.
-             *
-             * Die Bremse im Durchgang beendet nur DIESEN Durchgang - der Dauerlauf startete
-             * danach den naechsten nach der ueblichen Minute, und das Ganze von vorn: vierzig
-             * Adressen, fuenf Stoerungen, Abbruch, eine Minute Pause. Am 07.09.2026 lief das
-             * eine halbe Stunde so, waehrend beide Maschinen arbeiteten; die Waschmaschine
-             * beantwortete daraufhin nicht einmal mehr ihr Eco-Leaf. Ein Geraet, das gerade
-             * nicht kann, braucht Ruhe und keinen neuen Anlauf im Minutentakt.
-             */
-            const pause = lauf && lauf.ueberlastet ? PAUSE_NACH_UEBERLASTUNG_MS : PAUSE_ZWISCHEN_DURCHGAENGEN_MS;
-            if (lauf && lauf.ueberlastet) {
-                this.log.info(
-                    `${deviceId}: leaf scan paused for ` + `${pause / 60000} minutes - the appliance needs a rest.`,
-                );
-            }
-            await new Promise(r => this.setTimeout(r, pause));
-        }
+        this.scanPlanerStarten();
     }
 
     async onStateChange(id, state) {
@@ -4652,7 +4644,6 @@ class MieleLocal extends utils.Adapter {
         }
 
         if (scanIdx > 0 && parts[scanIdx + 1] === ids.SAMMLUNG.scan) {
-            const geraet = parts[scanIdx - 1];
             if (state.val === true) {
                 /*
                  * DER SCHALTER BLEIBT STEHEN - er bedeutet "scanne, bis fertig".
@@ -4662,13 +4653,12 @@ class MieleLocal extends utils.Adapter {
                  * Leerlauf antwortet, haette jemand zwei Dutzend Mal danebenstehen muessen -
                  * der Scan kam in vier Wochen ueber 23 Adressen nicht hinaus.
                  *
-                 * Jetzt laeuft er weiter, Durchgang um Durchgang, bis nichts mehr offen ist
-                 * oder der Schalter umgelegt wird. Zwischen den Durchgaengen liegt eine
-                 * Verschnaufpause; wird das Geraet in dieser Zeit gebraucht, sagt es mit 503
-                 * ab, und der Scan wartet geduldig (siehe leafscan.beschaeftigt).
+                 * Jetzt laeuft er weiter, bis nichts mehr offen ist oder der Schalter umgelegt
+                 * wird - seit 13.11.2026 langsam: ein Planer fuer alle Geraete, eine Anfrage je
+                 * 25 s, nur ohne laufendes Programm (siehe lib/leafscan.js).
                  */
                 await this.setStateAsync(id, { val: true, ack: true });
-                this.leafScanDauerlauf(geraet).catch(e => this.log.warn(`${geraet}: leaf scan failed - ${e.message}`));
+                this.scanPlanerStarten();
             } else {
                 await this.setStateAsync(id, { val: false, ack: true });
             }
@@ -5163,6 +5153,10 @@ class MieleLocal extends utils.Adapter {
     async onUnload(callback) {
         this.stopping = true;
         try {
+            // Was der langsame Scan seit der letzten Sicherung gefunden hat, nicht verlieren.
+            for (const deviceId of Object.keys(this._scan || {})) {
+                await this.scanSichern(deviceId, true).catch(() => {});
+            }
             if (this.pollTimer) {
                 this.clearTimeout(this.pollTimer);
             }

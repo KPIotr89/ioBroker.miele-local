@@ -39,16 +39,33 @@ genau das findet der Scan heraus.
 ### So wird gescannt
 
 Datenpunkt `<gerät>.collection.scan` auf `true` setzen. Der Schalter **bleibt stehen** und
-bedeutet „scanne, bis fertig": Der Adapter arbeitet Durchgang um Durchgang, mit einer Minute
-Verschnaufpause dazwischen, bis nichts mehr offen ist oder der Schalter umgelegt wird.
+bedeutet „scanne, bis fertig", bis nichts mehr offen ist oder der Schalter umgelegt wird.
+
+**Seit dem 13.11.2026 langsam und schonend** (vorher Durchgänge zu 40 Adressen im 5-s-Abstand,
+die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
+
+- **Ein Planer für alle Geräte**, nie zwei gleichzeitig, **höchstens eine Anfrage je 25 s**
+  (Kontrollfrage eingeschlossen), Zeitlimit 8 s je Anfrage.
+- Gescannt wird nur bei Status **aus (1)** oder **an (2)**, jeweils seit mindestens 5 min, und
+  **Programmende (7)** seit mindestens 15 min — nie während eines Programms, nie bei nicht
+  erreichbarem Gerät, nie während einer Feinaufzeichnung. Ob das Modul wach ist, entscheidet
+  die Kontrollfrage 2/1583 (Daten oder 404 = wach; 500/503 = schläft → 10 min Ruhe).
+- **Rückzug bei Störungen** (Timeout, Verbindung abgelehnt/abgebrochen): 5, 10, 20, 30 min
+  Pause für dieses Gerät. Eine Adresse, die dreimal stört, wird nicht mehr gefragt.
+- **Absagen gelten erst nach Bestätigung:** 404/500 zählen nur, wenn das Modul kurz vorher
+  (5 min) bewiesen hat, dass es unterscheidet, und erst **zwei solche Antworten im Abstand von
+  mindestens 6 h** machen die Adresse endgültig. Alte Ergebnisse: ein 404 zählt als eine
+  Bestätigung, ein 500 als keine (es kann aus einer Schlafphase stammen — 2/1585 stand so im
+  Ergebnis und antwortet heute mit Daten).
 
 Der Fortschritt steht in `collection.scanState`, die Ergebnisse in `collection.scanJson`.
 **Zum Teilen** (Forum, Fehlerbericht) `collection.scanJsonAnonym` nehmen: `scanJson` enthält
-Seriennummer (2/145), Modulnummer (14/1566), MAC (14/1571) sowie IP und WLAN-Namen (14/1573), die
+Seriennummer (2/145), vermutlich EUI/MAC (14/1565), Modulnummer (14/1566), MAC (14/1571) sowie IP
+und WLAN-Namen (14/1573), die
 anonyme Fassung maskiert sie. Eine Antwort, die der Adapter noch nicht dekodieren kann, steht dort
 als `antwortet: true` mit `status: 200`, dem Fehlertext unter `fehler` und den Rohbytes unter `roh`.
-Ein Adapterneustart beendet den Dauerlauf; der Fortschritt ist gesichert, und ein erneutes
-Umlegen macht dort weiter, wo er stand.
+Ein Adapterneustart setzt den Scan fort, solange der Schalter steht; gesichert wird nach jedem
+Treffer, nach zehn Antworten und beim Beenden.
 
 ### Die Bereiche und ihre Reihenfolge
 
