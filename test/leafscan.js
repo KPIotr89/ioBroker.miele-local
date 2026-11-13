@@ -84,6 +84,13 @@ describe('Leaf-Scan: langsamer Planer - welche Adresse als naechste', () => {
 describe('Leaf-Scan: langsamer Planer - Absagen einordnen', () => {
     const T = 1_000_000_000_000;
 
+    it('laesst eine gueltige 404-Bestaetigung von einem unbelegten 500 unberuehrt', () => {
+        let erg = ls.einordnen({}, 2, 9, { status: 404 }, { wach: true, jetzt: T });
+        erg = ls.einordnen(erg, 2, 9, { status: 500 }, { wach: false, jetzt: T + 1 });
+        expect(erg['2/9'].status).to.equal(404);
+        expect(ls.bestaetigungen(erg['2/9'])).to.equal(1);
+    });
+
     it('zaehlt ein 500 nur mit Wachbeleg', () => {
         const ohne = ls.einordnen({}, 2, 9, { status: 500 }, { wach: false, jetzt: T });
         expect(ls.bestaetigungen(ohne['2/9'])).to.equal(0);
@@ -146,18 +153,24 @@ describe('Leaf-Scan: langsamer Planer - Tempo und Schutz', () => {
         expect(ls.rueckzugMs(9)).to.equal(30 * 60000);
     });
 
-    it('scannt nicht waehrend eines Programms', () => {
-        for (const st of [3, 4, 5, 6, 9, 255, null]) {
+    it('scannt nicht bei gewaehltem, pausiertem, gestoertem oder unbekanntem Zustand', () => {
+        for (const st of [3, 4, 6, 8, 9, 255, null]) {
             expect(ls.scanErlaubt({ status: st, seitMs: 3600000, verbunden: true }), String(st)).to.equal(false);
         }
     });
 
+    it('scannt im Programm nur gebremst und erst nach zehn Minuten', () => {
+        expect(ls.scanErlaubt({ status: 5, seitMs: 300000, verbunden: true })).to.equal(false);
+        expect(ls.scanErlaubt({ status: 5, seitMs: 900000, verbunden: true })).to.equal('betrieb');
+        expect(ls.BETRIEB_ABSTAND_MS).to.be.at.least(60000);
+    });
+
     it('scannt im Aus/Ein/Ende erst nach einer Ruhezeit', () => {
         expect(ls.scanErlaubt({ status: 1, seitMs: 60000, verbunden: true })).to.equal(false);
-        expect(ls.scanErlaubt({ status: 1, seitMs: 600000, verbunden: true })).to.equal(true);
-        expect(ls.scanErlaubt({ status: 2, seitMs: 600000, verbunden: true })).to.equal(true);
-        expect(ls.scanErlaubt({ status: 7, seitMs: 600000, verbunden: true })).to.equal(false);
-        expect(ls.scanErlaubt({ status: 7, seitMs: 3600000, verbunden: true })).to.equal(true);
+        expect(ls.scanErlaubt({ status: 1, seitMs: 600000, verbunden: true })).to.equal('ruhe');
+        expect(ls.scanErlaubt({ status: 2, seitMs: 600000, verbunden: true })).to.equal('ruhe');
+        expect(ls.scanErlaubt({ status: 7, seitMs: 60000, verbunden: true })).to.equal(false);
+        expect(ls.scanErlaubt({ status: 7, seitMs: 180000, verbunden: true })).to.equal('ruhe');
     });
 
     it('scannt nicht, wenn die normale Abfrage das Geraet nicht erreicht', () => {

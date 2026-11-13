@@ -3732,7 +3732,7 @@ class MieleLocal extends utils.Adapter {
         let reihe = 0;
         this.log.info(
             `Leaf scan (slow): at most one request every ${leafscan.TAKT_MS / 1000} s across all appliances, ` +
-                'only while no programme runs and the module answers',
+                'only while the module answers (during a programme at most one per minute per appliance)',
         );
         while (!this.stopping) {
             const aktiv = [];
@@ -3851,8 +3851,13 @@ class MieleLocal extends utils.Adapter {
         });
         if (!erlaubt || (this.feinTimer && this.feinTimer[deviceId])) {
             z.wachBis = 0;
-            return warten(`waiting: programme running, just finished or appliance not reachable`);
+            return warten(`waiting: appliance busy (status ${status && status.val}) or not reachable`);
         }
+        // Im Programm gebremst: je Geraet hoechstens eine Anfrage pro BETRIEB_ABSTAND_MS.
+        if (erlaubt === 'betrieb' && z.letzteAnfrage && jetzt - z.letzteAnfrage < leafscan.BETRIEB_ABSTAND_MS) {
+            return 'warten';
+        }
+        z.letzteAnfrage = jetzt;
 
         // Ist das Modul wach? Ein Beleg gilt WACH_GUELTIG_MS; danach erst die Kontrollfrage.
         if (z.wachBis <= jetzt && !z.ohneKontrolle) {
@@ -3895,7 +3900,8 @@ class MieleLocal extends utils.Adapter {
         }
 
         const { unit, attr } = adr;
-        const wach = z.wachBis > jetzt;
+        // Im Programm zaehlt ein 500 nie - das Modul ist dann oft nur ausgelastet.
+        const wach = z.wachBis > jetzt && erlaubt === 'ruhe';
         let ergebnis;
         try {
             const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_LANGSAM_MS);
@@ -3956,7 +3962,7 @@ class MieleLocal extends utils.Adapter {
         } else {
             this.log.debug(
                 `${deviceId}: leaf scan - ${unit}/${attr} status ${neu.status}, ` +
-                    `confirmed ${leafscan.bestaetigungen(neu)}x${wach ? '' : ' (no awake proof)'}`,
+                    `confirmed ${leafscan.bestaetigungen(neu)}x${wach || neu.status !== 500 ? '' : ' (500 not counted)'}`,
             );
             if (z.ungespeichert >= 10) {
                 await this.scanSichern(deviceId);
@@ -4655,7 +4661,7 @@ class MieleLocal extends utils.Adapter {
                  *
                  * Jetzt laeuft er weiter, bis nichts mehr offen ist oder der Schalter umgelegt
                  * wird - seit 13.11.2026 langsam: ein Planer fuer alle Geraete, eine Anfrage je
-                 * 25 s, nur ohne laufendes Programm (siehe lib/leafscan.js).
+                 * 25 s, im Programm gebremst (siehe leafscan.scanErlaubt).
                  */
                 await this.setStateAsync(id, { val: true, ack: true });
                 this.scanPlanerStarten();

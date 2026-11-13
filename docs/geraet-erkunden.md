@@ -46,10 +46,14 @@ die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
 
 - **Ein Planer für alle Geräte**, nie zwei gleichzeitig, **höchstens eine Anfrage je 25 s**
   (Kontrollfrage eingeschlossen), Zeitlimit 8 s je Anfrage.
-- Gescannt wird nur bei Status **aus (1)** oder **an (2)**, jeweils seit mindestens 5 min, und
-  **Programmende (7)** seit mindestens 15 min — nie während eines Programms, nie bei nicht
-  erreichbarem Gerät, nie während einer Feinaufzeichnung. Ob das Modul wach ist, entscheidet
-  die Kontrollfrage 2/1583 (Daten oder 404 = wach; 500/503 = schläft → 10 min Ruhe).
+- Gescannt wird bei Status **aus (1)** oder **an (2)** seit mindestens 5 min, **Programmende
+  (7)** seit mindestens 2 min und — bewusst — **im Programm (5)** ab der zehnten Minute, dort
+  aber höchstens eine Anfrage pro Minute und Gerät, und ein 500 zählt im Programm nie. Grund
+  (gemessen 13.11.2026): Im Aus beantworten die EK037-Module schon die Kontrollfrage mit 500,
+  sie schlafen; die Spülmaschine steht nach dem Programm nur ~9 min auf 7. Nie gescannt wird bei
+  gewähltem/pausiertem/gestörtem Gerät, nicht erreichbarem Gerät oder laufender
+  Feinaufzeichnung. Ob das Modul wach ist, entscheidet die Kontrollfrage 2/1583 (Daten oder
+  404 = wach; 500/503 = schläft → 10 min Ruhe).
 - **Rückzug bei Störungen** (Timeout, Verbindung abgelehnt/abgebrochen): 5, 10, 20, 30 min
   Pause für dieses Gerät. Eine Adresse, die dreimal stört, wird nicht mehr gefragt.
 - **Absagen gelten erst nach Bestätigung:** 404/500 zählen nur, wenn das Modul kurz vorher
