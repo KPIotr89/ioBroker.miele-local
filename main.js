@@ -3854,7 +3854,11 @@ class MieleLocal extends utils.Adapter {
             return warten(`waiting: appliance busy (status ${status && status.val}) or not reachable`);
         }
         // Im Programm gebremst: je Geraet hoechstens eine Anfrage pro BETRIEB_ABSTAND_MS.
-        if (erlaubt === 'betrieb' && z.letzteAnfrage && jetzt - z.letzteAnfrage < leafscan.BETRIEB_ABSTAND_MS) {
+        // Ebenso eine Stunde lang nach einer Stoerung (Schonphase): Der Backofen H2469BP lief am
+        // 13.11.2026 bei 25 s Takt nach rund zehn Adressen in Timeouts, waehrend /State weiter
+        // antwortete.
+        const gebremst = erlaubt === 'betrieb' || (z.schonBis && z.schonBis > jetzt);
+        if (gebremst && z.letzteAnfrage && jetzt - z.letzteAnfrage < leafscan.BETRIEB_ABSTAND_MS) {
             return 'warten';
         }
         z.letzteAnfrage = jetzt;
@@ -3997,6 +4001,7 @@ class MieleLocal extends utils.Adapter {
         z.wachBis = 0;
         const pause = leafscan.rueckzugMs(z.fehler);
         z.pauseBis = Date.now() + pause;
+        z.schonBis = z.pauseBis + 3600000;
         this.log.info(
             `${deviceId}: leaf scan pausing ${pause / 60000} min after connection error ${z.fehler} in a row (${grund})`,
         );

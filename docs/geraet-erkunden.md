@@ -55,7 +55,9 @@ die die EK037-Module von Wasch- und Spülmaschine in Unit 14 überforderten):
   Feinaufzeichnung. Ob das Modul wach ist, entscheidet die Kontrollfrage 2/1583 (Daten oder
   404 = wach; 500/503 = schläft → 10 min Ruhe).
 - **Rückzug bei Störungen** (Timeout, Verbindung abgelehnt/abgebrochen): 5, 10, 20, 30 min
-  Pause für dieses Gerät. Eine Adresse, die dreimal stört, wird nicht mehr gefragt.
+  Pause für dieses Gerät, danach eine Stunde Schonphase mit höchstens einer Anfrage pro Minute
+  (Backofen H2469BP: Timeouts nach ~10 Adressen im 25-s-Takt, /State lief weiter). Eine Adresse,
+  die dreimal stört oder bei wachem Modul dreimal 503 liefert, wird nicht mehr gefragt.
 - **Absagen gelten erst nach Bestätigung:** 404/500 zählen nur, wenn das Modul kurz vorher
   (5 min) bewiesen hat, dass es unterscheidet, und erst **zwei solche Antworten im Abstand von
   mindestens 6 h** machen die Adresse endgültig. Alte Ergebnisse: ein 404 zählt als eine
