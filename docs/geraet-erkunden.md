@@ -38,11 +38,15 @@ genau das findet der Scan heraus.
 
 ### So wird gescannt
 
-Datenpunkt `<gerät>.sammlung.leafScan` auf `true` setzen. Der Schalter **bleibt stehen** und
+Datenpunkt `<gerät>.collection.scan` auf `true` setzen. Der Schalter **bleibt stehen** und
 bedeutet „scanne, bis fertig": Der Adapter arbeitet Durchgang um Durchgang, mit einer Minute
 Verschnaufpause dazwischen, bis nichts mehr offen ist oder der Schalter umgelegt wird.
 
-Der Fortschritt steht in `sammlung.leafScanStand`, die Ergebnisse in `sammlung.leafScanJson`.
+Der Fortschritt steht in `collection.scanState`, die Ergebnisse in `collection.scanJson`.
+**Zum Teilen** (Forum, Fehlerbericht) `collection.scanJsonAnonym` nehmen: `scanJson` enthält
+Seriennummer (2/145), Modulnummer (14/1566), MAC (14/1571) sowie IP und WLAN-Namen (14/1573), die
+anonyme Fassung maskiert sie. Eine Antwort, die der Adapter noch nicht dekodieren kann, steht dort
+als `antwortet: true` mit `status: 200`, dem Fehlertext unter `fehler` und den Rohbytes unter `roh`.
 Ein Adapterneustart beendet den Dauerlauf; der Fortschritt ist gesichert, und ein erneutes
 Umlegen macht dort weiter, wo er stand.
 
@@ -165,8 +169,8 @@ Die Aufzeichnung läuft von selbst: Alle drei Minuten werden die gefundenen Leaf
 gelesen, **aber nur bei Geräten, die gerade arbeiten**. Ein Gerät im Standby liefert dieselben
 Zahlen wie vor einer Stunde.
 
-- `sammlung.leafVerlaufJson` — je Leaf und Feld eine Reihe von Wertwechseln mit Zeitstempel
-- `sammlung.leafVerlaufStand` — Umfang der Ablage
+- `collection.trendJson` — je Leaf und Feld eine Reihe von Wertwechseln mit Zeitstempel
+- `collection.trendSize` — Umfang der Ablage
 
 ### Wenn die drei Minuten nicht reichen
 
@@ -177,7 +181,7 @@ Drei-Minuten-Messung fällt in einen zufälligen Takt — ein vorhandenes Schalt
 grundsätzlich nicht von Rauschen zu unterscheiden. Genau das war das Ergebnis: Über 24
 aufgezeichnete Wahrheitswerte lag die beste Trennschärfe bei 7,6 % gegen 0,6 %, also Zufall.
 
-Dafür gibt es `sammlung.leafVerlaufFein`: die Leaf-Adresse eintragen, und **dieses eine Leaf**
+Dafür gibt es `collection.trendLeaf`: die Leaf-Adresse eintragen, und **dieses eine Leaf**
 wird alle zwanzig Sekunden gelesen, während die normale Runde für das Gerät aussetzt. Die Last
 bleibt dieselbe — ein Leaf alle 20 s statt zehn alle 3 min —, die Auflösung wird neunfach
 feiner. Sie endet von selbst mit dem Programm.
@@ -244,12 +248,14 @@ Trommeldrehzahl zu tun.
 
 ### Was sich nicht finden ließ
 
-**Die Energie steht in keinem Feld von 2/6195.** Geprüft wurden alle 47 Felder in vier
+**Die Gesamtenergie steht in keinem Feld von 2/6195.** Geprüft wurden alle 47 Felder in vier
 Ableitungen (Endwert, Differenz, Maximum, Spanne) gegen elf Vergleichswerte; das beste Feld lag
-25 % daneben. Der Grund ist grundsätzlich: `eco.energyWh` ist die **Erwartung** des Geräts für
-das Programm, gesetzt beim Start — keine Messung. Am 03.09.2026 belegt: Der Wert stand 2:40
+25 % daneben. Der Grund ist grundsätzlich: `eco.energyWh` (Feld 25) ist die **Heizenergie-Vorgabe**
+für die Hauptwäsche — geplante Heizzeit (Feld 26, s) × 2020 W bei 230 V, gesetzt zu Beginn der
+Heizung, keine Messung (Befund 13.11.2026, 31 Läufe). Am 03.09.2026 belegt: Der Wert stand 2:40
 Stunden unverändert auf 770 Wh, während der Shelly von 0 auf 847 Wh stieg; über den ganzen Lauf
-maß der Shelly 1158 Wh.
+maß der Shelly 1158 Wh. Feld 16 zählt dagegen laufend die **Antriebsenergie** (ohne Heizstab, Wh);
+auch Feld 25 + Feld 16 trifft den Gesamtverbrauch nicht (im Mittel 40 % daneben).
 
 Ein zweites Argument, das hier lange stand, ist **falsch und zurückgenommen**: Eine Regression
 über Wassermenge × Temperaturhub ergab 0,000486 kWh/(L·K), also 42 % der Wärmekapazität von

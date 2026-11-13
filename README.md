@@ -111,9 +111,20 @@ their buttons with them, VIS can do the same.
 
 `eco.energy` (kWh), `eco.energyWh` (Wh), `eco.water` (l) where the appliance provides them, plus
 `eco.source` naming which source a value came from. Read over DOP2; so far washing machines
-deliver it. **The value the appliance reports is its own expectation, not a measurement.** For a
-real figure, enter a metering plug's counter state on the **Polling & values** tab — the adapter
-then records what each programme actually drew.
+deliver it. **The energy is not a measurement:** a washing machine reports the heating energy it
+*plans* for the main wash — planned heating time × the rated heater power at 230 V (WCR860: 2020 W).
+It is set once when heating starts and never updated; it contains neither motor, pumps and
+electronics nor the heating of other phases, and cold or short programmes report 0. Measured at a
+WCR860 it hits the real heating of normal warm programmes within a few per cent, but not the total
+consumption. For a real figure, enter a metering plug's counter state on the **Polling & values**
+tab — the adapter then records what each programme actually drew.
+
+If the appliance keeps its own EcoFeedback (DOP2 `2/1585`, field 6.3/6.4 with a unit type), that
+value of the last programme is used instead; the states are then named accordingly and `eco.source`
+says `Appliance (EcoFeedback)`. The adapter queries `2/1585` (and `2/391`) independently of the
+washing-machine leaf `2/6195`, so dishwashers and dryers that only know `2/1585` are covered too.
+Lifetime counters and TwinDos/AutoDos containers from `2/1585` appear under
+`detail.ecoFeedback` (only if the appliance actually keeps them).
 
 ### `history` and `stats` — what has run
 
@@ -278,7 +289,10 @@ divisor, and how closely.
 
 **Leaf scan.** DOP2 addresses data as `unit/attribute`, and only a handful of those addresses are
 documented anywhere. The scan works through the address space gently enough not to overwhelm the
-module; `collection.scanJson` collects what answered. `collection.trendLeaf` records a
+module; `collection.scanJson` collects what answered — including serial number, MAC, IP and Wi-Fi
+name. **For sharing, use `collection.scanJsonAnonym`**: the same data with those masked. Addresses
+whose answer the adapter cannot decode yet are kept as answered with the error text and the raw
+bytes, so the scan always completes. `collection.trendLeaf` records a
 single leaf closely while a programme runs — the field whose value grows with consumption is the
 one you are looking for.
 
@@ -331,6 +345,14 @@ engineering work of the projects `MieleRESTServer` (akappner),
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
 -->
+### **WORK IN PROGRESS**
+- (SmarthomeElektroniker) DOP2 parser reads type 33 (list of structures, AStruct). Until now a leaf containing it (e.g. `2/1585`, `2/17`, `2/131`) failed completely with "Unknown DOP2 field type 33".
+- (SmarthomeElektroniker) The device context `2/1585` (and `2/391` as fallback) is queried independently of the washing-machine leaf `2/6195`. Values of the appliance's own EcoFeedback (fields 6.3–6.6, 6.29, 6.31) honour the unit type (121 = Wh, 45 = kWh, 44 = l) and are only created if the appliance keeps them; TwinDos/AutoDos containers (6.7) appear as JSON.
+- (SmarthomeElektroniker) Leaf scan: answers that cannot be decoded count as answered (status 200, error text and raw bytes kept separately), so the scan always completes. New `collection.scanJsonAnonym` without serial number, module number, MAC, IP and Wi-Fi name, for sharing.
+- (SmarthomeElektroniker) `/State.ExtendedState` is logged (debug) and kept as raw hex in `collection.extendedState`, for diagnostics only.
+- (SmarthomeElektroniker) Names according to the measurements of 13.11.2026 (object IDs unchanged): `eco.energy`/`eco.energyWh` "Heating energy (setpoint at 230 V)", `detail.process.heatingEnergy`/`heatingTime` "(setpoint)", field 16 `energyConsumed` "Drive energy" in Wh (final value kept after the programme), field 4 "Elapsed time".
+- (SmarthomeElektroniker) Debug log: one line per appliance for 2/6195, 2/1585, 2/391 and ExtendedState, without the full serial number.
+
 ### 0.5.2 (2026-11-12)
 - (SmarthomeElektroniker) Fix: a card could show "not connected" and still offer the On button (or the light). After a stop or restart of the adapter the `control.can*` states kept their last value, and appliances not found at start kept them as well. Now the adapter clears them on stop and for every appliance not found at start; an appliance that is not reachable or reports status 255 ("not connected") gets no button at all
 - (SmarthomeElektroniker) The light button now also follows two read-only states, `control.canLightOn` and `control.canLightOff` (exactly one is true while the appliance is reachable). The card looks as before
