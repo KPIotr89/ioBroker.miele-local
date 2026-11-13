@@ -302,7 +302,7 @@ class MieleLocal extends utils.Adapter {
          */
         // Fuehrte das Geraet zuletzt sein eigenes EcoFeedback, gelten dessen Namen - siehe ecoCommon.
         const quelle = await this.getStateAsync(`${deviceId}.eco.source`).catch(() => null);
-        const amtlich = !!(quelle && quelle.val === 'Appliance (EcoFeedback)');
+        const amtlich = !!(quelle && String(quelle.val).startsWith('Appliance (lifetime'));
         const soll = objdef.ecoCommon(german, amtlich);
         for (const sub of Object.keys(soll)) {
             const id = `${deviceId}.${sub}`;
@@ -1220,6 +1220,7 @@ class MieleLocal extends utils.Adapter {
         }
         const laeuft = statusVal === 5 || statusVal === 6;
         let offen = this._cycles[deviceId];
+        const geraet = this.devices && this.devices[deviceId];
 
         // Nach einem Neustart ist der offene Zyklus weg, das Programm laeuft aber weiter. Ohne
         // Wiederaufnahme begann die Zaehlung von vorn: am 22.08.2026 stand im Verlauf
@@ -1260,10 +1261,15 @@ class MieleLocal extends utils.Adapter {
                  * dieser Zweig faengt ihn mit ab, weil das Geraet nach einer Minute bereits
                  * elapsedMinutes = 1 meldet und der Lauf damit wie eine Fortsetzung aussieht.
                  */
-                if (zaehlerStart == null && Date.now() - start < 5 * 60000) {
-                    zaehlerStart = await this.zaehlerStand(deviceId);
+                let kontextStart = null;
+                if (Date.now() - start < 5 * 60000) {
+                    if (zaehlerStart == null) {
+                        zaehlerStart = await this.zaehlerStand(deviceId);
+                    }
+                    // Ebenso die Lebenszaehler des Geraets - siehe kontextVerbrauchBuchen.
+                    kontextStart = geraet ? await this.kontextZaehlerStand(deviceId, geraet) : null;
                 }
-                this._cycles[deviceId] = { start, zaehlerStart };
+                this._cycles[deviceId] = { start, zaehlerStart, kontextStart };
                 offen = this._cycles[deviceId];
                 await this.ensureHistoryObjects(deviceId);
                 await this.setStateAsync(ids.h(deviceId, 'runningSince'), { val: start, ack: true });
@@ -1285,6 +1291,8 @@ class MieleLocal extends utils.Adapter {
                     ecoWasserStart: await stand(`${deviceId}.eco.water`),
                     // Der Stand der Messsteckdose beim Start - siehe gemessenerVerbrauch.
                     zaehlerStart: await this.zaehlerStand(deviceId),
+                    // Die Lebenszaehler des Geraets (2/1585) - siehe kontextVerbrauchBuchen.
+                    kontextStart: geraet ? await this.kontextZaehlerStand(deviceId, geraet) : null,
                 };
                 /*
                  * Den Stand aller Leafs beim Start holen - nebenher.
@@ -1462,6 +1470,10 @@ class MieleLocal extends utils.Adapter {
             dev.ecoWasserVorletzter = null;
         }
 
+        // Verbrauch aus den Lebenszaehlern des Geraets (2/1585) - vor dem Buchen.
+        await this.kontextVerbrauchBuchen(deviceId, dev, offen, eintrag).catch(e =>
+            this.log.debug(`${this.kennung(deviceId)}: counter consumption not booked - ${e.message}`),
+        );
         await this.appendCycle(deviceId, eintrag);
         await this.sammlungAufnehmen(deviceId, eintrag);
 
@@ -2605,29 +2617,24 @@ class MieleLocal extends utils.Adapter {
      *
      * @param deviceId Geraete-ID
      * @param dev Laufzeitzustand des Geraets
-     * @returns {Promise<{energieWh: number|null, wasserL: number|null}|null>} null = kein EcoFeedback
+     * @param {boolean} [erzwingen] ohne Minutensperre (Programmstart/-ende)
      */
-    async kontextAbfragen(deviceId, dev) {
+    async kontextAbfragen(deviceId, dev, erzwingen = false) {
         if (!this._kontextZuletzt) {
             this._kontextZuletzt = {};
         }
-        if (Date.now() - (this._kontextZuletzt[deviceId] || 0) < 60000) {
-            return dev.kontextLetzter || null;
+        if (!erzwingen && Date.now() - (this._kontextZuletzt[deviceId] || 0) < 60000) {
+            return;
         }
         this._kontextZuletzt[deviceId] = Date.now();
-        let ergebnis = await this.kontextLeafLesen(deviceId, dev, ECO_KONTEXT_LEAF, true);
+        const ergebnis = await this.kontextLeafLesen(deviceId, dev, ECO_KONTEXT_LEAF, true);
         if (!ergebnis.geliefert) {
-            const ersatz = await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, true);
-            if (ersatz.geliefert) {
-                ergebnis = ersatz;
-            }
+            await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, true);
         } else if (!dev.kontextErsatzErkundet) {
             // Einmal je Adapterlauf zur Erkundung mitlesen, nichts schreiben (siehe oben).
             dev.kontextErsatzErkundet = true;
             await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, false);
         }
-        dev.kontextLetzter = ergebnis.amtlich;
-        return ergebnis.amtlich;
     }
 
     /**
@@ -2637,7 +2644,7 @@ class MieleLocal extends utils.Adapter {
      * @param dev Laufzeitzustand des Geraets
      * @param {{unit: number, attr: number}} adresse 2/1585 oder 2/391
      * @param {boolean} schreiben Datenpunkte schreiben
-     * @returns {Promise<{geliefert: boolean, amtlich: {energieWh: number|null, wasserL: number|null}|null}>} Ergebnis
+     * @returns {Promise<{geliefert: boolean}>} ob das Leaf geantwortet hat
      */
     async kontextLeafLesen(deviceId, dev, adresse, schreiben) {
         const leaf = `${adresse.unit}/${adresse.attr}`;
@@ -2645,7 +2652,7 @@ class MieleLocal extends utils.Adapter {
         if (!this._kontextAbsagen) {
             this._kontextAbsagen = {};
         }
-        const nichts = { geliefert: false, amtlich: null };
+        const nichts = { geliefert: false };
         if ((this._kontextAbsagen[schluessel] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
             return nichts;
         }
@@ -2678,39 +2685,76 @@ class MieleLocal extends utils.Adapter {
         );
         if (schreiben) {
             await this.geraeteWerteSchreiben(deviceId, leaf, fields);
+            // Lebenszaehler fuer den Verbrauch je Programm - siehe kontextVerbrauchBuchen.
+            if (a.energieGesamtWh != null || a.wasserGesamtL != null) {
+                dev.kontextZaehler = { energieWh: a.energieGesamtWh, wasserL: a.wasserGesamtL, zeit: Date.now() };
+            }
         }
-        const amtlich =
-            a.energieLetzteWh != null || a.wasserLetzteL != null
-                ? { energieWh: a.energieLetzteWh, wasserL: a.wasserLetzteL }
-                : null;
-        return { geliefert: true, amtlich };
+        return { geliefert: true };
     }
 
     /**
-     * EcoFeedback des Geraets in die eco-Punkte schreiben, wenn das Eco-Leaf 2/6195 fehlt.
-     *
-     * Der Fall, auf den es ankommt: eine Spuelmaschine oder ein Trockner, die 2/6195 nicht kennen,
-     * aber unter 2/1585 Feld 6.3/6.4 den Verbrauch des letzten Programms fuehren. Bis 0.5.2 kam
-     * dieser Wert nie an (siehe kontextAbfragen).
+     * Den Stand der Lebenszaehler aus 2/1585 (Feld 6.5/6.6) - frisch gelesen, wenn moeglich.
      *
      * @param deviceId Geraete-ID
      * @param dev Laufzeitzustand des Geraets
-     * @param {{energieWh: number|null, wasserL: number|null}} amtlich Werte aus 2/1585
+     * @returns {Promise<{energieWh: number|null, wasserL: number|null, zeit: number}|null>} Stand oder null
      */
-    async ecoAmtlichSchreiben(deviceId, dev, amtlich) {
-        dev.ecoAmtlich = true;
-        dev.ecoAmtlichEnergie = amtlich.energieWh != null;
-        await this.ensureEcoObjects(deviceId);
-        await this.setStateChangedAsync(`${deviceId}.eco.source`, { val: 'Appliance (EcoFeedback)', ack: true });
-        if (amtlich.energieWh != null) {
-            await this.setStateChangedAsync(`${deviceId}.eco.energyWh`, { val: amtlich.energieWh, ack: true });
-            await this.setStateChangedAsync(`${deviceId}.eco.energy`, {
-                val: Math.round(amtlich.energieWh) / 1000,
-                ack: true,
-            });
+    async kontextZaehlerStand(deviceId, dev) {
+        await this.kontextAbfragen(deviceId, dev, true).catch(() => {});
+        return dev.kontextZaehler ? Object.assign({}, dev.kontextZaehler) : null;
+    }
+
+    /**
+     * Verbrauch eines abgeschlossenen Programms aus den Lebenszaehlern des Geraets buchen.
+     *
+     * WARUM. Die Spuelmaschine G5840 beantwortet 2/6195 nicht, fuehrt aber unter 2/1585 Feld 6.5/6.6
+     * Lebenszaehler fuer Energie (Einheitentyp 121 = Wh) und Wasser (44 = l) - am 13.11.2026 zum
+     * ersten Mal gelesen. Die Differenz zwischen Programmstart und -ende ist der Verbrauch dieses
+     * Programms, gemessen vom Geraet selbst. Bei der Waschmaschine kommt dieselbe Differenz als
+     * Vergleichswert in den Datensatz, ersetzt aber F21/F25 nicht.
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @param {object} offen der zu Ende gehende Zyklus (kontextStart)
+     * @param {object} eintrag der Zyklus-Eintrag, wird ergaenzt
+     */
+    async kontextVerbrauchBuchen(deviceId, dev, offen, eintrag) {
+        if (!dev || !offen || !offen.kontextStart) {
+            return;
         }
-        if (amtlich.wasserL != null) {
-            await this.setStateChangedAsync(`${deviceId}.eco.water`, { val: amtlich.wasserL, ack: true });
+        const ende = await this.kontextZaehlerStand(deviceId, dev);
+        const v = geraetekontext.verbrauch(offen.kontextStart, ende);
+        const wer = this.kennung(deviceId);
+        if (!v) {
+            this.log.debug(`Context ${wer}: no consumption from the lifetime counters (start or end missing)`);
+            return;
+        }
+        eintrag.geraetZaehler = v;
+        this.log.info(
+            `${wer}: consumption from the appliance counters (2/1585) - ` +
+                `${v.energieWh == null ? '-' : `${v.energieWh} Wh`}, ${v.wasserL == null ? '-' : `${v.wasserL} l`}`,
+        );
+        // Nur dort eintragen, wo der Adapter sonst nichts hat (Geraete ohne 2/6195).
+        const energie = eintrag.energyKwh == null && v.energieWh != null;
+        const wasser = eintrag.waterL == null && v.wasserL != null;
+        if (!energie && !wasser) {
+            return;
+        }
+        dev.ecoAmtlichEnergie = energie;
+        await this.ensureEcoObjects(deviceId);
+        await this.setStateChangedAsync(`${deviceId}.eco.source`, {
+            val: 'Appliance (lifetime counters 2/1585)',
+            ack: true,
+        });
+        if (energie) {
+            eintrag.energyKwh = Math.round(v.energieWh) / 1000;
+            await this.setStateAsync(`${deviceId}.eco.energyWh`, { val: v.energieWh, ack: true });
+            await this.setStateAsync(`${deviceId}.eco.energy`, { val: eintrag.energyKwh, ack: true });
+        }
+        if (wasser) {
+            eintrag.waterL = v.wasserL;
+            await this.setStateAsync(`${deviceId}.eco.water`, { val: v.wasserL, ack: true });
         }
     }
 
@@ -2730,25 +2774,15 @@ class MieleLocal extends utils.Adapter {
              * Bis 0.5.2 lief er nur nach einer erfolgreichen Antwort auf 2/6195 und erreichte
              * damit gerade die Geraete nie, die 2/6195 nicht kennen. Siehe kontextAbfragen.
              */
-            const amtlich = await this.kontextAbfragen(deviceId, dev).catch(e => {
-                this.log.debug(`Context ${wer}: ${e.message}`);
-                return null;
-            });
-            const nurAmtlich = async () => {
-                if (amtlich) {
-                    await this.ecoAmtlichSchreiben(deviceId, dev, amtlich);
-                }
-            };
+            await this.kontextAbfragen(deviceId, dev).catch(e => this.log.debug(`Context ${wer}: ${e.message}`));
             // Geräte ohne Eco-Leaf nicht endlos fragen. Der Zähler lebt nur im Arbeitsspeicher:
             // nach einem Neustart wird erneut geprüft, falls ein Gerät inzwischen mehr kann.
             if ((this._ecoAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
-                await nurAmtlich();
                 continue;
             }
             // Ein 500er sagt nichts über das Modell aus - die Spülmaschine antwortet so im
             // Aus-Zustand. Solche Geräte werden weiter gefragt, nur eben seltener.
             if (this._ecoSelten && this._ecoSelten[deviceId] && Date.now() < this._ecoSelten[deviceId]) {
-                await nurAmtlich();
                 continue;
             }
             let plain;
@@ -2775,13 +2809,11 @@ class MieleLocal extends utils.Adapter {
                         this._ecoSelten[deviceId] = Date.now() + 5 * 60 * 1000;
                     }
                     this.log.debug(`Eco ${wer}: 2/6195 HTTP ${res.status} - no eco leaf${schluss}`);
-                    await nurAmtlich();
                     continue;
                 }
                 plain = this.mc.decryptResponse(res.headers['x-signature'], res.body);
             } catch (e) {
                 this.log.debug(`Eco ${wer}: 2/6195 - ${e.message}`);
-                await nurAmtlich();
                 continue;
             }
             let fields;
@@ -2789,7 +2821,6 @@ class MieleLocal extends utils.Adapter {
                 ({ fields } = dop2.parseLeaf(plain));
             } catch (e) {
                 this.log.debug(`Eco ${wer}: 2/6195 parse error ${e.message}`);
-                await nurAmtlich();
                 continue;
             }
             this.log.debug(`Eco ${wer}: 2/6195 HTTP 200 - ${ecoRegel.prozessZeile(fields)}`);
@@ -2811,28 +2842,16 @@ class MieleLocal extends utils.Adapter {
                 Number(this.config.ecoWaterDiv) > 0 ? Number(this.config.ecoWaterDiv) : ECO_WATER_DIV,
             );
             /*
-             * Was das Geraet selbst als EcoFeedback fuehrt, hat Vorrang.
+             * Das EcoFeedback des Geraets (2/1585 Feld 6.3/6.4) ersetzt diese Werte NICHT mehr.
              *
-             * DER FALLBACK IST DER DURCHFLUSSZAEHLER, nicht umgekehrt. Sagt das Geraet, wie viel
-             * Wasser das letzte Programm gebraucht hat, gilt seine Zahl; schweigt es, bleibt es
-             * bei Feld 21 des Eco-Leaf geteilt durch 200 - der Impulszaehlung, die an 24 Laeufen
-             * gegen den Hauswasserzaehler steht (Median 200,10 Impulse je Liter, Streuung 1,4 %).
-             *
-             * HOECHSTENS EINMAL JE MINUTE. Das Modul bedient nur eine Verbindung; wer den
-             * Eco-Takt auf zehn Sekunden stellt, soll damit nicht auch diesen Abruf versechsfachen.
+             * Bis 0.5.2 stand hier "das Geraet hat Vorrang" - entworfen, ohne dass je ein Geraet
+             * 2/1585 beantwortet hatte. Seit dem 13.11.2026 antwortet die WCR860, und es zeigt
+             * sich: 6.3/6.4 sind die Werte des LETZTEN, abgeschlossenen Programms. Mitten im Lauf
+             * haette eco.water damit 27 l (Vorlauf) statt der laufenden 74 l gezeigt, und die
+             * Endwert-Regeln (ecoRegel.ablesungBewerten) waeren ausgehebelt. Die Geraetewerte
+             * stehen unter detail.ecoFeedback; den Verbrauch je Programm aus den Lebenszaehlern
+             * rechnet trackCycle (kontextVerbrauchBuchen).
              */
-            if (amtlich) {
-                if (amtlich.wasserL != null) {
-                    eco.waterL = amtlich.wasserL;
-                    dev.ecoAmtlich = true;
-                }
-                if (amtlich.energieWh != null) {
-                    eco.energyWh = amtlich.energieWh;
-                    eco.energyKwh = Math.round(amtlich.energieWh) / 1000;
-                    dev.ecoAmtlich = true;
-                    dev.ecoAmtlichEnergie = true;
-                }
-            }
             if (eco.energyWh == null && eco.waterL == null) {
                 continue;
             }
@@ -2846,7 +2865,7 @@ class MieleLocal extends utils.Adapter {
              * Einstellung "Gerät"/"Durchflusszähler" unter der ID eco.quelle.
              */
             await this.setStateChangedAsync(`${deviceId}.eco.source`, {
-                val: dev.ecoAmtlich ? 'Appliance (EcoFeedback)' : 'Adapter (flow meter)',
+                val: 'Adapter (flow meter)',
                 ack: true,
             });
 

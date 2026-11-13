@@ -119,12 +119,13 @@ WCR860 it hits the real heating of normal warm programmes within a few per cent,
 consumption. For a real figure, enter a metering plug's counter state on the **Polling & values**
 tab — the adapter then records what each programme actually drew.
 
-If the appliance keeps its own EcoFeedback (DOP2 `2/1585`, field 6.3/6.4 with a unit type), that
-value of the last programme is used instead; the states are then named accordingly and `eco.source`
-says `Appliance (EcoFeedback)`. The adapter queries `2/1585` (and `2/391`) independently of the
-washing-machine leaf `2/6195`, so dishwashers and dryers that only know `2/1585` are covered too.
-Lifetime counters and TwinDos/AutoDos containers from `2/1585` appear under
-`detail.ecoFeedback` (only if the appliance actually keeps them).
+The adapter also queries the device context `2/1585` (and `2/391`), independently of the
+washing-machine leaf `2/6195`. Its values appear under `detail.ecoFeedback` (only if the appliance
+actually keeps them): energy and water of the last programme (6.3/6.4), lifetime counters (6.5/6.6)
+and TwinDos/AutoDos containers (6.7). The "last programme" values do **not** replace `eco.*` — during
+a run they still show the previous programme. Appliances without `2/6195` (e.g. a dishwasher) get
+their consumption per programme from the **difference of the lifetime counters** between start and
+end; then `eco.*` carries that value and `eco.source` says `Appliance (lifetime counters 2/1585)`.
 
 ### `history` and `stats` — what has run
 
@@ -347,7 +348,7 @@ engineering work of the projects `MieleRESTServer` (akappner),
 -->
 ### **WORK IN PROGRESS**
 - (SmarthomeElektroniker) DOP2 parser reads type 33 (list of structures, AStruct). Until now a leaf containing it (e.g. `2/1585`, `2/17`, `2/131`) failed completely with "Unknown DOP2 field type 33".
-- (SmarthomeElektroniker) The device context `2/1585` (and `2/391` as fallback) is queried independently of the washing-machine leaf `2/6195`. Values of the appliance's own EcoFeedback (fields 6.3–6.6, 6.29, 6.31) honour the unit type (121 = Wh, 45 = kWh, 44 = l) and are only created if the appliance keeps them; TwinDos/AutoDos containers (6.7) appear as JSON.
+- (SmarthomeElektroniker) The device context `2/1585` (and `2/391` as fallback) is queried independently of the washing-machine leaf `2/6195`. Values of the appliance's own EcoFeedback (fields 6.3–6.6, 6.29, 6.31) honour the unit type (121/46 = Wh, 45 = kWh, 44 = l) and are only created if the appliance keeps them; TwinDos/AutoDos containers (6.7) appear as JSON. Appliances without `2/6195` (dishwasher) get energy and water per programme from the difference of the lifetime counters 6.5/6.6. The "last programme" values no longer replace `eco.*` while a programme runs.
 - (SmarthomeElektroniker) Leaf scan: answers that cannot be decoded count as answered (status 200, error text and raw bytes kept separately), so the scan always completes. New `collection.scanJsonAnonym` without serial number, module number, MAC, IP and Wi-Fi name, for sharing.
 - (SmarthomeElektroniker) `/State.ExtendedState` is logged (debug) and kept as raw hex in `collection.extendedState`, for diagnostics only.
 - (SmarthomeElektroniker) Names according to the measurements of 13.11.2026 (object IDs unchanged): `eco.energy`/`eco.energyWh` "Heating energy (setpoint at 230 V)", `detail.process.heatingEnergy`/`heatingTime` "(setpoint)", field 16 `energyConsumed` "Drive energy" in Wh (final value kept after the programme), field 4 "Elapsed time".

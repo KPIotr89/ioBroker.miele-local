@@ -114,8 +114,10 @@ die `ha-miele-at-lan` zusätzlich kennt.
 | G5840 (Spülmaschine) | 19 | u. a. 2/119, 2/145, 2/173, 2/174, 2/256 — **kein** 2/6195 |
 | H2469BP (Backofen) | 0 | alle 882 gescannten Adressen 404; Unit 14 war nie gefragt |
 
-Keines der drei Geräte hat bisher 2/1585 beantwortet (XKM EK037/EK057, HTTP 404 bzw. 500) — dort,
-wo das EcoFeedback des Herstellers stünde. Für sie zählt der Adapter die Impulse des
+Bis 12.11.2026 hatte keines der drei Geräte 2/1585 beantwortet (Scan: 404). **Am 13.11.2026
+antworteten WCR860 und G5840 mit 200** (beide liefen): G5840 nur Lebenszähler 6.5 = 1.467.400 Wh
+(Typ 121), 6.6 = 20.676 l (Typ 44); WCR860 6.3 = 206 / 6.5 = 2.508.477 (Typ 46 „EcoEnergyWatt“, als Wh
+gelesen), 6.4 = 27 l / 6.6 = 196.620 l (Typ 44). H2469BP (EK057): 404. Für sie zählt der Adapter die Impulse des
 Durchflusszählers (Feld 21 ÷ 200). Seit der Version nach 0.5.2 wird 2/1585 (und 2/391) unabhängig
 von 2/6195 gefragt; bis dahin lief die Abfrage nur nach einer erfolgreichen Antwort auf 2/6195 und
 erreichte die Spülmaschine nie.

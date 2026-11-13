@@ -123,12 +123,13 @@ wenige Prozent, den Gesamtverbrauch aber nicht. Wer eine echte Zahl will, trägt
 **Abfrage & Werte** den Zähler-Datenpunkt einer Messsteckdose ein – dann schreibt der Adapter mit,
 was ein Programm wirklich gezogen hat.
 
-Führt das Gerät ein eigenes EcoFeedback (DOP2 `2/1585`, Feld 6.3/6.4 mit Einheitentyp), gilt dessen
-Wert für das letzte Programm; die Datenpunkte heißen dann entsprechend, und `eco.source` lautet
-`Appliance (EcoFeedback)`. Der Adapter fragt `2/1585` (und `2/391`) unabhängig vom
-Waschmaschinen-Leaf `2/6195` ab – damit sind auch Spülmaschinen und Trockner erfasst, die nur
-`2/1585` kennen. Lebenszähler und TwinDos/AutoDos-Behälter aus `2/1585` erscheinen unter
-`detail.ecoFeedback` (nur, wenn das Gerät sie wirklich führt).
+Zusätzlich fragt der Adapter den Gerätekontext `2/1585` (und `2/391`) ab, unabhängig vom
+Waschmaschinen-Leaf `2/6195`. Dessen Werte erscheinen unter `detail.ecoFeedback` (nur, wenn das Gerät
+sie wirklich führt): Energie und Wasser des letzten Programms (6.3/6.4), Lebenszähler (6.5/6.6) und
+TwinDos/AutoDos-Behälter (6.7). Die Werte „letztes Programm“ ersetzen `eco.*` **nicht** – im Lauf
+zeigen sie noch das vorige Programm. Geräte ohne `2/6195` (etwa eine Spülmaschine) bekommen ihren
+Verbrauch je Programm aus der **Differenz der Lebenszähler** zwischen Start und Ende; dann steht
+dieser Wert in `eco.*`, und `eco.source` lautet `Appliance (lifetime counters 2/1585)`.
 
 ### `history` und `stats` – was gelaufen ist
 
@@ -362,7 +363,7 @@ Reverse-Engineering-Arbeit der Projekte `MieleRESTServer` (akappner),
 -->
 ### **WORK IN PROGRESS**
 - (SmarthomeElektroniker) Der DOP2-Parser liest Typ 33 (Liste von Strukturen, AStruct). Bisher scheiterte ein Leaf, das ihn enthält (z. B. `2/1585`, `2/17`, `2/131`), komplett mit „Unknown DOP2 field type 33“.
-- (SmarthomeElektroniker) Der Gerätekontext `2/1585` (ersatzweise `2/391`) wird unabhängig vom Waschmaschinen-Leaf `2/6195` abgefragt. Werte des geräteeigenen EcoFeedback (Felder 6.3–6.6, 6.29, 6.31) beachten den Einheitentyp (121 = Wh, 45 = kWh, 44 = l) und entstehen nur, wenn das Gerät sie führt; TwinDos/AutoDos-Behälter (6.7) erscheinen als JSON.
+- (SmarthomeElektroniker) Der Gerätekontext `2/1585` (ersatzweise `2/391`) wird unabhängig vom Waschmaschinen-Leaf `2/6195` abgefragt. Werte des geräteeigenen EcoFeedback (Felder 6.3–6.6, 6.29, 6.31) beachten den Einheitentyp (121/46 = Wh, 45 = kWh, 44 = l) und entstehen nur, wenn das Gerät sie führt; TwinDos/AutoDos-Behälter (6.7) erscheinen als JSON. Geräte ohne `2/6195` (Spülmaschine) bekommen Energie und Wasser je Programm aus der Differenz der Lebenszähler 6.5/6.6. Die Werte „letztes Programm“ ersetzen `eco.*` im laufenden Programm nicht mehr.
 - (SmarthomeElektroniker) Leaf-Suche: Antworten, die sich nicht dekodieren lassen, gelten als beantwortet (Status 200, Fehlertext und Rohbytes getrennt abgelegt) – die Suche wird damit immer fertig. Neu `collection.scanJsonAnonym` ohne Seriennummer, Modulnummer, MAC, IP und WLAN-Namen, zum Teilen.
 - (SmarthomeElektroniker) `/State.ExtendedState` wird protokolliert (debug) und als Hex-Rohwert in `collection.extendedState` abgelegt, nur zur Diagnose.
 - (SmarthomeElektroniker) Namen nach den Messungen vom 13.11.2026 (Objekt-IDs unverändert): `eco.energy`/`eco.energyWh` „Heizenergie (Vorgabe bei 230 V)“, `detail.process.heatingEnergy`/`heatingTime` „(Vorgabe)“, Feld 16 `energyConsumed` „Antriebsenergie“ in Wh (Endstand bleibt nach dem Programm stehen), Feld 4 „Laufzeit“.

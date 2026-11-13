@@ -115,3 +115,30 @@ describe('Prozessfelder 2/6195: Namen laut Befund 13.11.2026', () => {
         expect(datenpunkte.definition('2/6195', 'Process', 16, 1, false).common.name).to.equal('Drive energy');
     });
 });
+
+describe('Geraetekontext: Verbrauch aus den Lebenszaehlern', () => {
+    it('rechnet die Differenz zwischen Programmstart und -ende', () => {
+        expect(
+            gk.verbrauch({ energieWh: 1467400, wasserL: 20676 }, { energieWh: 1468300, wasserL: 20688 }),
+        ).to.deep.equal({ energieWh: 900, wasserL: 12 });
+    });
+
+    it('gibt keine Aussage bei fehlendem Stand oder rueckwaerts laufendem Zaehler', () => {
+        expect(gk.verbrauch(null, { energieWh: 1, wasserL: 1 })).to.equal(null);
+        expect(gk.verbrauch({ energieWh: 5, wasserL: null }, { energieWh: 3, wasserL: 9 })).to.equal(null);
+        expect(gk.verbrauch({ energieWh: 5, wasserL: 2 }, { energieWh: 3, wasserL: 9 })).to.deep.equal({
+            energieWh: null,
+            wasserL: 7,
+        });
+    });
+
+    it('liest Einheitentyp 46 (EcoEnergyWatt) als Wh - so meldet es die WCR860', () => {
+        const a = gk.auswerten(kontextLeaf({ letzteWh: 206, letzteTyp: 46, gesamtWh: 2508477, gesamtTyp: 46 }));
+        expect(a.energieLetzteWh).to.equal(206);
+        expect(a.energieGesamtWh).to.equal(2508477);
+        const d = datenpunkte
+            .fuerLeaf('2/1585', kontextLeaf({ gesamtTyp: 46 }), true)
+            .find(x => x.sub === 'ecoFeedbackTotalEnergyConsumption');
+        expect(d.common.unit).to.equal('Wh');
+    });
+});
