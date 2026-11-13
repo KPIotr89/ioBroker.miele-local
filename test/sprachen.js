@@ -142,7 +142,9 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         }
     });
 
-    it('Programmnamen: Home Assistant, sonst Englisch - nie leer, nie geraten', () => {
+    it('Programmnamen: Home Assistant, sonst Englisch - nie leer, nie geraten', function () {
+        // Rund 1,7 s auf dem Entwicklungsrechner - knapp unter Mochas Vorgabe von 2 s.
+        this.timeout(20000);
         for (const [dt, m] of Object.entries(enums.BY_TYPE)) {
             for (const [k, schluessel] of Object.entries(enums.TABLES[m.program])) {
                 if (!schluessel || werte.NICHTS.has(schluessel)) {

@@ -52,6 +52,7 @@ const PAUSE_NACH_UEBERLASTUNG_MS = 60000;
 const { MielePushListener } = require('./lib/push');
 const enroll = require('./lib/enroll');
 const dop2 = require('./lib/dop2');
+const geraetekontext = require('./lib/geraetekontext');
 const stats = require('./lib/stats');
 const { mussNachziehen } = require('./lib/objektabgleich');
 const { MieleGeraeteManager, angebot, angebotLeeren, fortschritt } = require('./lib/geraetemanager');
@@ -59,8 +60,16 @@ const { MieleGeraeteManager, angebot, angebotLeeren, fortschritt } = require('./
 /*
  * EcoFeedback: DOP2-Leaf 2/6195 (bislang nur Waschmaschinen liefern ihn).
  *
- * Die Feldindizes sind 1-basiert und modellabhängig; für die WCR860 wurden sie gegen den
- * Cloud-Adapter geprüft.
+ * Die Feldindizes sind 1-basiert und modellabhängig. Stand 13.11.2026 (WCR860, 31 Läufe gegen
+ * Messsteckdose) - die Tabelle darunter ist die GESCHICHTE dieser Zuordnung, nicht der Befund:
+ *
+ *   #25  Heizenergie-VORGABE der Hauptwäsche in Wh = #26 x 2020 W bei 230 V (keine Messung)
+ *   #26  geplante Heizzeit in s
+ *   #16  Antriebsenergie in Wh, zählt laufend, ohne Heizstab
+ *   #21  Wasser, 5 ml je Impuls (÷ 200 = l)
+ *   #4   Laufzeit in min (zählt aufwärts)
+ *
+ * Bis 0.3.x stand hier:
  *
  *   #25  Energie in Wh              2077 ≈ Cloud 1,9 kWh
  *   #26  Wasser in Hundertstellitern 3703 ≈ Cloud 34 l
@@ -141,10 +150,14 @@ const ECO_WATER_DIV = 200; // Teilungsfaktor Wasserfeld: Rohwert / Faktor = Lite
  * der Wert des Geraets ist die Auskunft des Herstellers.
  */
 const ECO_KONTEXT_LEAF = { unit: 2, attr: 1585 };
-/** Feld 6 von 2/1585 traegt die Geraeteattribute, darin Feld 4 das Wasser des letzten Programms. */
-const ECO_KONTEXT_WASSER = '6.4';
-/** ... und Feld 3 die Energie des letzten Programms. */
-const ECO_KONTEXT_ENERGIE = '6.3';
+/*
+ * Feld 6 von 2/1585 traegt die Geraeteattribute, darin 6.3/6.4 Energie und Wasser des letzten
+ * Programms - ausgewertet mit Einheitentyp in lib/geraetekontext.js.
+ *
+ * 2/391 traegt laut Namenstabelle (lib/leafnamen.js) ebenfalls einen DeviceContext und wird
+ * gefragt, wenn 2/1585 nichts liefert.
+ */
+const KONTEXT_ERSATZ_LEAF = { unit: 2, attr: 391 };
 
 // Sekundengenaue Zeiten aus DOP2-Leaf 2/256 (verifiziert: #7 Restzeit s, #8 Laufzeit s).
 const SEC_LEAF = { unit: 2, attr: 256 };
@@ -287,7 +300,10 @@ class MieleLocal extends utils.Adapter {
          * das kein EcoFeedback mehr liefert, durchlaeuft ensureEcoObjects nie - dort waere
          * die Korrektur sonst haengen geblieben.
          */
-        const soll = objdef.ecoCommon(german);
+        // Fuehrte das Geraet zuletzt sein eigenes EcoFeedback, gelten dessen Namen - siehe ecoCommon.
+        const quelle = await this.getStateAsync(`${deviceId}.eco.source`).catch(() => null);
+        const amtlich = !!(quelle && quelle.val === 'Appliance (EcoFeedback)');
+        const soll = objdef.ecoCommon(german, amtlich);
         for (const sub of Object.keys(soll)) {
             const id = `${deviceId}.${sub}`;
             try {
@@ -956,8 +972,28 @@ class MieleLocal extends utils.Adapter {
                     val: f.type === 'number' ? Number(val) : String(val),
                     ack: true,
                 });
+                // Fuer kurze Protokollzeilen ohne Seriennummer - siehe kennung().
+                if (f.sub === 'techType' && this.devices && this.devices[deviceId] && val) {
+                    this.devices[deviceId].techType = String(val);
+                }
             }
         }
+    }
+
+    /**
+     * Ein Geraet im Protokoll benennen, ohne die Seriennummer auszuschreiben.
+     *
+     * Debug-Zeilen landen in Forenbeitraegen und Fehlerberichten. Die Seriennummer identifiziert
+     * ein einzelnes Geraet; fuer die Zuordnung im eigenen Protokoll reichen Modell und die
+     * letzten vier Stellen ("WCR860 …3556").
+     *
+     * @param {string} deviceId Geraete-ID (Seriennummer)
+     * @returns {string} kurze Kennung
+     */
+    kennung(deviceId) {
+        const dev = this.devices && this.devices[deviceId];
+        const modell = (dev && dev.techType) || 'appliance';
+        return `${modell} …${String(deviceId).slice(-4)}`;
     }
 
     /** /State-Objekt in ioBroker-States übernehmen. */
@@ -2550,67 +2586,132 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
-     * Das EcoFeedback des Geraets holen - falls es eines fuehrt.
+     * Den Geraetekontext holen - 2/1585 und ersatzweise 2/391 -, UNABHAENGIG vom Eco-Leaf.
      *
-     * DREI ABSAGEN, DANN RUHE. Dieselbe Regel wie beim Eco-Leaf: Ein 404 heisst "dieses Modell
-     * kennt den Leaf nicht", und das aendert sich nicht mehr. Der Zaehler lebt nur im
-     * Arbeitsspeicher - nach einem Neustart wird erneut geprueft, falls inzwischen eine neue
-     * Firmware auf dem Modul liegt.
+     * BIS 0.5.2 HING DAS AM ECO-LEAF. ecoKontextLesen lief nur, wenn 2/6195 vorher mit 200
+     * geantwortet hatte. Gerade die Geraete, fuer die 2/1585 die einzige Verbrauchsquelle waere -
+     * Spuelmaschinen und Trockner, die 2/6195 nicht kennen -, wurden damit nie gefragt.
      *
-     * Die Felder selbst landen als Datenpunkte unter "detail.ecoFeedback" - dafuer ist hier
-     * nichts zu tun, das erledigt geraeteWerteSchreiben aus demselben Abruf.
+     * DREI ABSAGEN, DANN RUHE - je Adresse. Ein 404/501 heisst "dieses Modell kennt den Leaf
+     * nicht", und das aendert sich nicht mehr. Der Zaehler lebt nur im Arbeitsspeicher; nach einem
+     * Neustart wird erneut geprueft, falls inzwischen eine neue Firmware auf dem Modul liegt.
+     *
+     * HOECHSTENS EINMAL JE MINUTE und nur, wenn auch das Eco-Leaf gefragt wuerde (Geraet wach
+     * oder erste Erkundung nach dem Start). Das Modul bedient nur eine Verbindung.
+     *
+     * 2/391 traegt laut Namenstabelle ebenfalls einen DeviceContext. Seine Werte werden nur
+     * geschrieben, wenn 2/1585 nichts liefert - sonst stuenden zwei Quellen in denselben
+     * Datenpunkten und wechselten sich ab.
      *
      * @param deviceId Geraete-ID
      * @param dev Laufzeitzustand des Geraets
-     * @returns {{energieWh: number|null, wasserL: number|null}|null} null = kein EcoFeedback
+     * @returns {Promise<{energieWh: number|null, wasserL: number|null}|null>} null = kein EcoFeedback
      */
-    async ecoKontextLesen(deviceId, dev) {
+    async kontextAbfragen(deviceId, dev) {
+        if (!this._kontextZuletzt) {
+            this._kontextZuletzt = {};
+        }
+        if (Date.now() - (this._kontextZuletzt[deviceId] || 0) < 60000) {
+            return dev.kontextLetzter || null;
+        }
+        this._kontextZuletzt[deviceId] = Date.now();
+        let ergebnis = await this.kontextLeafLesen(deviceId, dev, ECO_KONTEXT_LEAF, true);
+        if (!ergebnis.geliefert) {
+            const ersatz = await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, true);
+            if (ersatz.geliefert) {
+                ergebnis = ersatz;
+            }
+        } else if (!dev.kontextErsatzErkundet) {
+            // Einmal je Adapterlauf zur Erkundung mitlesen, nichts schreiben (siehe oben).
+            dev.kontextErsatzErkundet = true;
+            await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, false);
+        }
+        dev.kontextLetzter = ergebnis.amtlich;
+        return ergebnis.amtlich;
+    }
+
+    /**
+     * Ein Kontext-Leaf lesen, protokollieren und - wenn gewuenscht - als Datenpunkte schreiben.
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @param {{unit: number, attr: number}} adresse 2/1585 oder 2/391
+     * @param {boolean} schreiben Datenpunkte schreiben
+     * @returns {Promise<{geliefert: boolean, amtlich: {energieWh: number|null, wasserL: number|null}|null}>} Ergebnis
+     */
+    async kontextLeafLesen(deviceId, dev, adresse, schreiben) {
+        const leaf = `${adresse.unit}/${adresse.attr}`;
+        const schluessel = `${deviceId}:${adresse.attr}`;
         if (!this._kontextAbsagen) {
             this._kontextAbsagen = {};
         }
-        if ((this._kontextAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
-            return null;
+        const nichts = { geliefert: false, amtlich: null };
+        if ((this._kontextAbsagen[schluessel] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
+            return nichts;
         }
+        const wer = this.kennung(deviceId);
         let fields;
         try {
-            const res = await dev.api.readDop2(dev.route, ECO_KONTEXT_LEAF.unit, ECO_KONTEXT_LEAF.attr);
+            const res = await dev.api.readDop2(dev.route, adresse.unit, adresse.attr);
             if (res.status !== 200 || !res.headers['x-signature']) {
+                let zusatz = '';
                 if (MieleLocal.kenntLeafNicht(res.status)) {
-                    this._kontextAbsagen[deviceId] = (this._kontextAbsagen[deviceId] || 0) + 1;
-                    if (this._kontextAbsagen[deviceId] >= MieleLocal.ECO_ABSAGEN_MAX) {
-                        this.log.debug(
-                            `Eco ${deviceId}: this model has no own ` +
-                                'EcoFeedback (2/1585), the flow meter remains the source.',
-                        );
+                    const n = (this._kontextAbsagen[schluessel] = (this._kontextAbsagen[schluessel] || 0) + 1);
+                    zusatz = ` (${n}/${MieleLocal.ECO_ABSAGEN_MAX})`;
+                    if (n >= MieleLocal.ECO_ABSAGEN_MAX) {
+                        zusatz += ' - this model does not know the leaf, no longer queried';
                     }
                 }
-                return null;
+                this.log.debug(`Context ${wer}: ${leaf} HTTP ${res.status}${zusatz}`);
+                return nichts;
             }
             ({ fields } = dop2.parseLeaf(this.mc.decryptResponse(res.headers['x-signature'], res.body)));
         } catch (e) {
-            this.log.debug(`Eco ${deviceId}: 2/1585 - ${e.message}`);
-            return null;
+            this.log.debug(`Context ${wer}: ${leaf} - ${e.message}`);
+            return nichts;
         }
-        this._kontextAbsagen[deviceId] = 0;
-        const leaf = `${ECO_KONTEXT_LEAF.unit}/${ECO_KONTEXT_LEAF.attr}`;
-        await this.geraeteWerteSchreiben(deviceId, leaf, fields);
+        this._kontextAbsagen[schluessel] = 0;
+        const a = geraetekontext.auswerten(fields);
+        this.log.debug(
+            `Context ${wer}: ${leaf} HTTP 200, ${Object.keys(fields).length} fields - ` +
+                `${geraetekontext.protokollZeile(a)}${schreiben ? '' : ' (not written, 2/1585 answers)'}`,
+        );
+        if (schreiben) {
+            await this.geraeteWerteSchreiben(deviceId, leaf, fields);
+        }
+        const amtlich =
+            a.energieLetzteWh != null || a.wasserLetzteL != null
+                ? { energieWh: a.energieLetzteWh, wasserL: a.wasserLetzteL }
+                : null;
+        return { geliefert: true, amtlich };
+    }
 
-        let werte;
-        try {
-            werte = datenpunkte.istwerte(leaf, fields);
-        } catch {
-            return null;
+    /**
+     * EcoFeedback des Geraets in die eco-Punkte schreiben, wenn das Eco-Leaf 2/6195 fehlt.
+     *
+     * Der Fall, auf den es ankommt: eine Spuelmaschine oder ein Trockner, die 2/6195 nicht kennen,
+     * aber unter 2/1585 Feld 6.3/6.4 den Verbrauch des letzten Programms fuehren. Bis 0.5.2 kam
+     * dieser Wert nie an (siehe kontextAbfragen).
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @param {{energieWh: number|null, wasserL: number|null}} amtlich Werte aus 2/1585
+     */
+    async ecoAmtlichSchreiben(deviceId, dev, amtlich) {
+        dev.ecoAmtlich = true;
+        dev.ecoAmtlichEnergie = amtlich.energieWh != null;
+        await this.ensureEcoObjects(deviceId);
+        await this.setStateChangedAsync(`${deviceId}.eco.source`, { val: 'Appliance (EcoFeedback)', ack: true });
+        if (amtlich.energieWh != null) {
+            await this.setStateChangedAsync(`${deviceId}.eco.energyWh`, { val: amtlich.energieWh, ack: true });
+            await this.setStateChangedAsync(`${deviceId}.eco.energy`, {
+                val: Math.round(amtlich.energieWh) / 1000,
+                ack: true,
+            });
         }
-        const hole = pfad => {
-            const w = werte.find(x => x.pfad === pfad);
-            return w && typeof w.wert === 'number' ? w.wert : null;
-        };
-        const energieWh = hole(ECO_KONTEXT_ENERGIE);
-        const wasserL = hole(ECO_KONTEXT_WASSER);
-        if (energieWh == null && wasserL == null) {
-            return null;
+        if (amtlich.wasserL != null) {
+            await this.setStateChangedAsync(`${deviceId}.eco.water`, { val: amtlich.wasserL, ack: true });
         }
-        return { energieWh, wasserL };
     }
 
     async pollEco() {
@@ -2618,19 +2719,36 @@ class MieleLocal extends utils.Adapter {
             this._ecoAbsagen = {};
         }
         for (const [deviceId, dev] of Object.entries(this.devices)) {
-            // Geräte ohne Eco-Leaf nicht endlos fragen. Der Zähler lebt nur im Arbeitsspeicher:
-            // nach einem Neustart wird erneut geprüft, falls ein Gerät inzwischen mehr kann.
-            if ((this._ecoAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
-                continue;
-            }
             // Schlafende Geraete nicht behelligen - siehe ecoAbfragenSinnvoll.
             if (!this.ecoAbfragenSinnvoll(deviceId, dev)) {
                 continue;
             }
             this._ecoErkundet[deviceId] = true;
+            const wer = this.kennung(deviceId);
+            /*
+             * Zuerst der Geraetekontext (2/1585, ersatzweise 2/391) - UNABHAENGIG vom Eco-Leaf.
+             * Bis 0.5.2 lief er nur nach einer erfolgreichen Antwort auf 2/6195 und erreichte
+             * damit gerade die Geraete nie, die 2/6195 nicht kennen. Siehe kontextAbfragen.
+             */
+            const amtlich = await this.kontextAbfragen(deviceId, dev).catch(e => {
+                this.log.debug(`Context ${wer}: ${e.message}`);
+                return null;
+            });
+            const nurAmtlich = async () => {
+                if (amtlich) {
+                    await this.ecoAmtlichSchreiben(deviceId, dev, amtlich);
+                }
+            };
+            // Geräte ohne Eco-Leaf nicht endlos fragen. Der Zähler lebt nur im Arbeitsspeicher:
+            // nach einem Neustart wird erneut geprüft, falls ein Gerät inzwischen mehr kann.
+            if ((this._ecoAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
+                await nurAmtlich();
+                continue;
+            }
             // Ein 500er sagt nichts über das Modell aus - die Spülmaschine antwortet so im
             // Aus-Zustand. Solche Geräte werden weiter gefragt, nur eben seltener.
             if (this._ecoSelten && this._ecoSelten[deviceId] && Date.now() < this._ecoSelten[deviceId]) {
+                await nurAmtlich();
                 continue;
             }
             let plain;
@@ -2656,21 +2774,25 @@ class MieleLocal extends utils.Adapter {
                         }
                         this._ecoSelten[deviceId] = Date.now() + 5 * 60 * 1000;
                     }
-                    this.log.debug(`Eco ${deviceId}: no eco leaf (HTTP ${res.status})${schluss}`);
+                    this.log.debug(`Eco ${wer}: 2/6195 HTTP ${res.status} - no eco leaf${schluss}`);
+                    await nurAmtlich();
                     continue;
                 }
                 plain = this.mc.decryptResponse(res.headers['x-signature'], res.body);
             } catch (e) {
-                this.log.debug(`Eco ${deviceId}: ${e.message}`);
+                this.log.debug(`Eco ${wer}: 2/6195 - ${e.message}`);
+                await nurAmtlich();
                 continue;
             }
             let fields;
             try {
                 ({ fields } = dop2.parseLeaf(plain));
             } catch (e) {
-                this.log.debug(`Eco ${deviceId}: parse error ${e.message}`);
+                this.log.debug(`Eco ${wer}: 2/6195 parse error ${e.message}`);
+                await nurAmtlich();
                 continue;
             }
+            this.log.debug(`Eco ${wer}: 2/6195 HTTP 200 - ${ecoRegel.prozessZeile(fields)}`);
             // Auch die uebrigen Felder dieses Leaf sind Messwerte - sie kosten keinen weiteren
             // Abruf, weil der Leaf ohnehin gerade gelesen wurde.
             await this.geraeteWerteSchreiben(deviceId, `${ECO_LEAF.unit}/${ECO_LEAF.attr}`, fields);
@@ -2699,22 +2821,16 @@ class MieleLocal extends utils.Adapter {
              * HOECHSTENS EINMAL JE MINUTE. Das Modul bedient nur eine Verbindung; wer den
              * Eco-Takt auf zehn Sekunden stellt, soll damit nicht auch diesen Abruf versechsfachen.
              */
-            if (!this._kontextZuletzt) {
-                this._kontextZuletzt = {};
-            }
-            if (Date.now() - (this._kontextZuletzt[deviceId] || 0) >= 60000) {
-                this._kontextZuletzt[deviceId] = Date.now();
-                const amtlich = await this.ecoKontextLesen(deviceId, dev);
-                if (amtlich) {
-                    if (amtlich.wasserL != null) {
-                        eco.waterL = amtlich.wasserL;
-                        dev.ecoAmtlich = true;
-                    }
-                    if (amtlich.energieWh != null) {
-                        eco.energyWh = amtlich.energieWh;
-                        eco.energyKwh = Math.round(amtlich.energieWh) / 1000;
-                        dev.ecoAmtlich = true;
-                    }
+            if (amtlich) {
+                if (amtlich.wasserL != null) {
+                    eco.waterL = amtlich.wasserL;
+                    dev.ecoAmtlich = true;
+                }
+                if (amtlich.energieWh != null) {
+                    eco.energyWh = amtlich.energieWh;
+                    eco.energyKwh = Math.round(amtlich.energieWh) / 1000;
+                    dev.ecoAmtlich = true;
+                    dev.ecoAmtlichEnergie = true;
                 }
             }
             if (eco.energyWh == null && eco.waterL == null) {
@@ -2806,8 +2922,22 @@ class MieleLocal extends utils.Adapter {
                             alleFelder[idx] = Number(v);
                         }
                     }
+                    // Den Endstand der Antriebsenergie (F16) halten - siehe ecoRegel.endstandHalten.
+                    let altFelder = null;
+                    try {
+                        altFelder = hatteWerte ? JSON.parse(vorherige.val) : null;
+                    } catch {
+                        altFelder = null;
+                    }
+                    const { werte, gehalten } = ecoRegel.endstandHalten(altFelder, alleFelder, laeuft);
+                    if (gehalten.length) {
+                        this.log.debug(
+                            `Eco ${wer}: field ${gehalten.join(', ')} reset to 0 after the programme, ` +
+                                'final value kept in fieldsJson',
+                        );
+                    }
                     await this.setStateAsync(`${deviceId}.eco.fieldsJson`, {
-                        val: JSON.stringify(alleFelder),
+                        val: JSON.stringify(werte),
                         ack: true,
                     });
                 }
@@ -3061,6 +3191,26 @@ class MieleLocal extends utils.Adapter {
                 '',
                 false,
             ],
+            // Dasselbe ohne Seriennummer, MAC, IP und WLAN-Name - zum Teilen.
+            [
+                ids.SAMMLUNG.scanJsonAnonym,
+                'Gefundene Leafs ohne Kennungen (JSON, zum Teilen)',
+                'Found leaves without identifiers (JSON, for sharing)',
+                'string',
+                'json',
+                '',
+                false,
+            ],
+            // Rohwert von /State.ExtendedState - nur Diagnose, siehe extendedStateDiagnose.
+            [
+                ids.SAMMLUNG.extendedState,
+                'ExtendedState aus /State (Hex, Diagnose)',
+                'ExtendedState from /State (hex, diagnostics)',
+                'string',
+                'text',
+                '',
+                false,
+            ],
             /*
              * Rolle "level", nicht value.*: Beide Felder sind EINGABEN des Nutzers und damit
              * beschreibbar. value.* verlangt write = false - die Objektpruefung des PR #6471
@@ -3154,7 +3304,11 @@ class MieleLocal extends utils.Adapter {
         if (!this._ecoCreated) {
             this._ecoCreated = {};
         }
-        if (this._ecoCreated[deviceId]) {
+        // Die Namen haengen an der Quelle der Energie (siehe ecoCommon): Wechselt sie, neu anlegen.
+        const dev = this.devices && this.devices[deviceId];
+        const amtlich = !!(dev && dev.ecoAmtlichEnergie);
+        const variante = amtlich ? 'amtlich' : 'vorgabe';
+        if (this._ecoCreated[deviceId] === variante) {
             return;
         }
         const german = this.config.germanNames !== false;
@@ -3167,7 +3321,7 @@ class MieleLocal extends utils.Adapter {
         // Zwei getrennte Tabellen fuer dieselben Punkte waren bis 0.3.10 der Grund dafuer,
         // dass die Umbenennung der Energiefelder wirkungslos blieb: Diese Stelle setzte
         // beim naechsten laufenden Programm die alten Namen zurueck.
-        const defs = objdef.ecoStates(german, this.config.ecoRawFields);
+        const defs = objdef.ecoStates(german, this.config.ecoRawFields, amtlich);
         for (const d of defs) {
             await this.extendObjectAsync(`${deviceId}.eco.${d.sub}`, {
                 type: 'state',
@@ -3175,7 +3329,7 @@ class MieleLocal extends utils.Adapter {
                 native: {},
             });
         }
-        this._ecoCreated[deviceId] = true;
+        this._ecoCreated[deviceId] = variante;
     }
 
     /** Sekundengenaue Rest-/Laufzeit aus DOP2 2/256 (#7 Rest s, #8 Lauf s) – nur wo verfügbar. */
@@ -3400,6 +3554,9 @@ class MieleLocal extends utils.Adapter {
                     const state = await dev.api.getState(dev.route);
                     if (state) {
                         await this.applyState(deviceId, state);
+                        await this.extendedStateDiagnose(deviceId, state).catch(e =>
+                            this.log.debug(`State ${this.kennung(deviceId)}: ExtendedState - ${e.message}`),
+                        );
                         await this.setStateAsync(`${deviceId}.info.connected`, { val: true, ack: true });
                         ok = true;
                     }
@@ -3447,6 +3604,50 @@ class MieleLocal extends utils.Adapter {
             await this.verbucheAbfrage(deviceId, fehler, wiederholt && !fehler);
         }
         await this.setStateAsync('info.connection', { val: ok, ack: true });
+    }
+
+    /**
+     * /State.ExtendedState mitlesen - NUR als Diagnose, ohne Deutung.
+     *
+     * WAS MAN DARUEBER WEISS. Das Feld ist ein Hex-Text, dessen Aufbau je Geraeteart verschieden
+     * ist. Fuer Kochfelder ist er belegt (ha-miele-at-lan, extended_state.py: Kochzonen,
+     * Leistungsstufen). Fuer Waschmaschinen gibt es nur den Hinweis, dass bei WMV960/G6992 die
+     * Bytes 50-51 Energie in 0,1 kWh und 52-53 Wasser in Litern tragen sollen - ungeprueft und
+     * modellabhaengig. Deshalb: Rohwert in einen Diagnosepunkt (wenn der Sammlungskanal existiert)
+     * und eine Debug-Zeile, sobald sich etwas aendert. Als Verbrauch gedeutet wird nichts.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {object} state Antwort von /State
+     */
+    async extendedStateDiagnose(deviceId, state) {
+        const dev = this.devices && this.devices[deviceId];
+        const hex = state && state.ExtendedState;
+        if (!dev || typeof hex !== 'string' || !hex) {
+            if (dev && !dev.extStateGemeldet) {
+                dev.extStateGemeldet = true;
+                this.log.debug(`State ${this.kennung(deviceId)}: no ExtendedState in /State`);
+            }
+            return;
+        }
+        if (dev.extStateLetzter === hex) {
+            return;
+        }
+        dev.extStateLetzter = hex;
+        dev.extStateGemeldet = true;
+        const b = /^[0-9a-f]+$/i.test(hex) && hex.length % 2 === 0 ? Buffer.from(hex, 'hex') : null;
+        let bytes = '';
+        if (b && b.length >= 54) {
+            bytes =
+                `, bytes 50-53 ${b.subarray(50, 54).toString('hex')} ` +
+                `(u16 BE ${b.readUInt16BE(50)}/${b.readUInt16BE(52)}, LE ${b.readUInt16LE(50)}/${b.readUInt16LE(52)})`;
+        }
+        this.log.debug(
+            `State ${this.kennung(deviceId)}: ExtendedState ${b ? `${b.length} bytes` : `${hex.length} chars`}` +
+                `${bytes}: ${hex.slice(0, 160)}${hex.length > 160 ? '…' : ''}`,
+        );
+        if (this._sammlungCreated && this._sammlungCreated[deviceId]) {
+            await this.setStateChangedAsync(ids.s(deviceId, 'extendedState'), { val: hex.slice(0, 4000), ack: true });
+        }
     }
 
     /**
@@ -3568,7 +3769,21 @@ class MieleLocal extends utils.Adapter {
             try {
                 const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_MS);
                 if (res.status === 200 && res.headers['x-signature']) {
-                    ergebnis = { felder: this.leafFelder(res) };
+                    /*
+                     * Eine Antwort, die sich nicht dekodieren laesst, ist trotzdem eine Antwort.
+                     *
+                     * Bis 0.5.2 landete ein Parse-Fehler ("Unknown DOP2 field type 33") als
+                     * Text im Status - und Text zaehlt in leafscan.beantwortet nicht. Die Adresse
+                     * blieb offen, wurde in jedem Durchgang neu gefragt, und der Scan wurde nie
+                     * fertig. Jetzt: Status 200, Fehlertext daneben, Rohdaten zur Auswertung.
+                     */
+                    try {
+                        ergebnis = { felder: this.leafFelder(res) };
+                    } catch (e) {
+                        const roh = this.leafRoh(res);
+                        ergebnis = { status: 200, fehler: e.message, roh };
+                        this.log.debug(`${this.kennung(deviceId)}: ${unit}/${attr} answers, but ${e.message}`);
+                    }
                 } else {
                     ergebnis = { status: res.status };
                 }
@@ -3645,7 +3860,7 @@ class MieleLocal extends utils.Adapter {
 
             // Zwischenspeichern, damit ein Abbruch nicht den ganzen Durchgang kostet.
             if (++geprueft % leafscan.SICHERN_ALLE === 0) {
-                await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
+                await this.scanErgebnisSchreiben(deviceId, bisher);
                 await this.setStateAsync(ids.s(deviceId, 'scanState'), {
                     val: leafscan.fortschritt(bisher).text,
                     ack: true,
@@ -3655,7 +3870,7 @@ class MieleLocal extends utils.Adapter {
             await new Promise(r => this.setTimeout(r, leafscan.PAUSE_MS));
         }
 
-        await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
+        await this.scanErgebnisSchreiben(deviceId, bisher);
         const f = leafscan.fortschritt(bisher);
         await this.setStateAsync(ids.s(deviceId, 'scanState'), { val: f.text, ack: true });
         const t = leafscan
@@ -3725,6 +3940,38 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
+     * Die entschluesselten Bytes eines Leafs als Hex-Text - fuer Antworten, die der Parser nicht
+     * versteht. Auf 4000 Zeichen begrenzt, damit ein grosses Leaf den Datenpunkt nicht sprengt.
+     *
+     * @param res Antwort der Leaf-Abfrage
+     * @returns {string|null} Hex-Text, null wenn auch das Entschluesseln scheitert
+     */
+    leafRoh(res) {
+        try {
+            return this.mc.decryptResponse(res.headers['x-signature'], res.body).toString('hex').slice(0, 4000);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Das Scan-Ergebnis schreiben - vollstaendig und ohne Kennungen.
+     *
+     * scanJson enthaelt alles, was das Geraet geantwortet hat, also auch Seriennummer (2/145),
+     * Modulnummer (14/1566), MAC (14/1571) und IP/WLAN-Name (14/1573). Zum Teilen in Foren oder
+     * Fehlerberichten dient scanJsonAnonym: dieselben Daten, diese Felder maskiert - siehe
+     * leafscan.anonymisieren.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {object} bisher Scan-Ergebnis
+     */
+    async scanErgebnisSchreiben(deviceId, bisher) {
+        await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
+        const anonym = leafscan.anonymisieren(bisher, [deviceId]);
+        await this.setStateAsync(ids.s(deviceId, 'scanJsonAnonym'), { val: JSON.stringify(anonym), ack: true });
+    }
+
+    /**
      * Ein gelesenes Leaf einmal auspacken - roh UND gedeutet.
      *
      * WARUM BEIDES. Der Verlauf braucht die ROHE Struktur: "[9, 0, 0, 40, 0, 0]" zeigt, dass
@@ -3788,8 +4035,32 @@ class MieleLocal extends utils.Adapter {
         }
         const bekannt = this._dpAngelegt[deviceId] || (this._dpAngelegt[deviceId] = {});
         let geschrieben = 0;
+        let laeuft = null;
         for (const d of defs) {
             const id = `${deviceId}.detail.${d.kanal}.${d.sub}`;
+            /*
+             * Endstand der Antriebsenergie halten (2/6195 Feld 16).
+             *
+             * Das Geraet nullt den Zaehler beim Uebergang in den Ruhezustand. Steht kein Programm,
+             * bleibt deshalb der letzte Wert groesser 0 stehen - der Datenpunkt bedeutet
+             * "laufendes oder zuletzt beendetes Programm", wie eco.water. Siehe
+             * ecoRegel.endstandHalten.
+             */
+            if (leaf === `${ECO_LEAF.unit}/${ECO_LEAF.attr}` && d.wert === 0 && d.sub === 'energyConsumed') {
+                if (laeuft === null) {
+                    const st = await this.getStateAsync(`${deviceId}.state.status`);
+                    laeuft = !!(st && (st.val === 5 || st.val === 6));
+                }
+                const alt = laeuft ? null : await this.getStateAsync(id);
+                const { gehalten } = ecoRegel.endstandHalten(
+                    { 16: alt && typeof alt.val === 'number' ? alt.val : null },
+                    { 16: 0 },
+                    laeuft,
+                );
+                if (gehalten.length) {
+                    continue;
+                }
+            }
             if (!bekannt[id]) {
                 // Der Kanal einmal je Geraet - extendObject ist genuegsam, aber nicht umsonst.
                 if (!bekannt[`kanal:${d.kanal}`]) {

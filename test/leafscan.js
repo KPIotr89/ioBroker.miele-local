@@ -333,3 +333,63 @@ describe('Leaf-Scan: Kontrollfrage, die nie antwortet', () => {
         expect(ls.trotzdemVersuchen({ kennt: true, taub: 99, grenze: 10 })).to.be.false;
     });
 });
+
+describe('Leaf-Scan: Antwort mit Parse-Fehler', () => {
+    // Bis 0.5.2 blieb eine solche Adresse offen ("Fehler: Unknown DOP2 field type 33" ist kein
+    // Status), und der Scan wurde nie fertig - an der WWG760 bei 2/1585 gesehen.
+    const ergebnis = { status: 200, fehler: 'Unknown DOP2 field type 34 @40', roh: '00aa' };
+
+    it('zaehlt als beantwortet', () => {
+        expect(ls.beantwortet(ergebnis)).to.equal(true);
+        expect(ls.ueberlastet(ergebnis)).to.equal(false);
+    });
+
+    it('legt Status numerisch und Fehlertext getrennt ab - und die Adresse ist erledigt', () => {
+        const erg = ls.aufnehmen({}, 2, 1585, ergebnis);
+        expect(erg['2/1585']).to.deep.equal({
+            antwortet: true,
+            status: 200,
+            fehler: 'Unknown DOP2 field type 34 @40',
+            felder: {},
+            anzahl: 0,
+            roh: '00aa',
+        });
+        const offen = ls.naechste(erg, 2000).map(a => `${a.unit}/${a.attr}`);
+        expect(offen).to.not.include('2/1585');
+        expect(ls.fortschritt(erg).gefunden).to.equal(1);
+    });
+});
+
+describe('Leaf-Scan: Export ohne Kennungen', () => {
+    const SERIE = '000111111111';
+    const scan = {
+        '2/145': { antwortet: true, felder: { 1: SERIE, 2: '65', 3: 'G5840', 4: '11223344' }, anzahl: 4 },
+        '14/1566': { antwortet: true, felder: { 1: 12345678, 2: [1, 2, 3] }, anzahl: 2 },
+        '14/1571': { antwortet: true, felder: { 17: 'mac-001D63FFFEAAA2DC', 2: true }, anzahl: 2 },
+        '14/1573': { antwortet: true, felder: { 2: [192, 168, 30, 80], 9: 'Mein-WLAN' }, anzahl: 2 },
+        '2/119': { antwortet: true, felder: { 1: 439713 }, anzahl: 1 },
+        '2/256': { antwortet: true, felder: { 3: `Datei ${SERIE}.bin`, 4: '00:1d:63:aa:bb:cc' }, anzahl: 2 },
+        '2/1585': { antwortet: true, status: 200, fehler: 'x', felder: {}, anzahl: 0, roh: Buffer.from(SERIE).toString('hex') },
+        '2/1586': { antwortet: false, status: 404 },
+    };
+
+    it('maskiert Seriennummer, Modulnummer, MAC, IP und WLAN-Namen', () => {
+        const a = ls.anonymisieren(scan, [SERIE]);
+        const text = JSON.stringify(a);
+        expect(text).to.not.include(SERIE);
+        expect(text).to.not.include('Mein-WLAN');
+        expect(text).to.not.include('1D63');
+        expect(text).to.not.include('12345678');
+        expect(a['14/1573'].felder[2], 'Aufbau bleibt sichtbar').to.deep.equal(['***', '***', '***', '***']);
+        expect(a['14/1571'].felder[2], 'Wahrheitswerte verraten nichts').to.equal(true);
+        expect(a['2/256'].felder[4]).to.equal('***');
+        expect(a['2/1585'].roh).to.equal('***');
+    });
+
+    it('laesst alles andere unveraendert und das Original unberuehrt', () => {
+        const a = ls.anonymisieren(scan, [SERIE]);
+        expect(a['2/119']).to.deep.equal(scan['2/119']);
+        expect(a['2/1586']).to.deep.equal(scan['2/1586']);
+        expect(scan['2/145'].felder[1]).to.equal(SERIE);
+    });
+});
