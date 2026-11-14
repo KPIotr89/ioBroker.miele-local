@@ -376,6 +376,7 @@ engineering work of the projects `MieleRESTServer` (akappner),
 <!--
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
+- (KPIotr89) Loxone templates: every input carries a description and, where one exists, the value table in the selected language; new template for the UDP datagrams of the LoxBerry MQTT Gateway (`VIU_Miele_LoxBerry.xml`, button on the MQTT tab)
 - (KPIotr89) New tab **MQTT**: built-in MQTT client publishing all values including the text states (`<prefix>/<serial>/<value>`), last will `<prefix>/connected`, optional commands under `<prefix>/<serial>/set/<command>`. Off by default
 - (KPIotr89) New tab **Loxone**: values go straight to a Loxone Miniserver as UDP datagrams (`miele/<serial>/<value>=<number>`), optional commands from the Miniserver by UDP, and templates for Loxone Config (`VIU_Miele.xml`, `VO_Miele.xml`). Off by default
 -->

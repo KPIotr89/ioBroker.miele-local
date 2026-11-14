@@ -4743,8 +4743,8 @@ class MieleLocal extends utils.Adapter {
      *
      * Die Angaben kommen aus dem Formular (noch nicht gespeichert) oder aus der Konfiguration.
      *
-     * @param {'in'|'out'} art virtuelle UDP-Eingaenge oder virtuelle Ausgaenge
-     * @param {{host?: string, port?: number|string, commandPort?: number|string}} [formular] Formularwerte
+     * @param {'in'|'out'|'mqtt'} art UDP-Eingaenge, virtuelle Ausgaenge oder UDP-Eingaenge fuer das LoxBerry MQTT Gateway
+     * @param {{host?: string, port?: number|string, commandPort?: number|string, mqttPrefix?: string, mqttUdpPort?: number|string}} [formular] Formularwerte
      * @returns {Promise<{url: string, datei: string, anzahl: number}>} Adresse, Dateiname, Zahl der Eintraege
      */
     async loxoneVorlage(art, formular = {}) {
@@ -4770,7 +4770,12 @@ class MieleLocal extends utils.Adapter {
                     vorhanden.add(`${kanal}.${sub}`);
                 }
             }
-            geraete.push({ id: deviceId, name: name || deviceId, vorhanden });
+            geraete.push({
+                id: deviceId,
+                name: name || deviceId,
+                deviceType: this.devices[deviceId].deviceType,
+                vorhanden,
+            });
         }
         if (!geraete.length) {
             throw new Error('No appliances found yet - the template would be empty.');
@@ -4783,17 +4788,29 @@ class MieleLocal extends utils.Adapter {
         }
         let text;
         let datei;
+        const nameFn = (kanal, sub, en) => {
+            const n = objdef.nameFor(kanal, sub, en, true);
+            return typeof n === 'string' ? n : n[sp] || n.en;
+        };
         if (art === 'in') {
             text = loxone.vorlageEingaenge({
                 port: Number(formular.port) || Number(this.config.loxonePort) || 7000,
                 geraete,
                 sprache: sp,
-                nameFn: (kanal, sub, en) => {
-                    const n = objdef.nameFor(kanal, sub, en, true);
-                    return typeof n === 'string' ? n : n[sp] || n.en;
-                },
+                nameFn,
             });
             datei = 'loxone/VIU_Miele.xml';
+        } else if (art === 'mqtt') {
+            // Datagramme des LoxBerry MQTT Gateways: "MQTT: <Praefix>/<Seriennummer>/<Wert>=<Zahl>"
+            text = loxone.vorlageEingaenge({
+                port: Number(formular.mqttUdpPort) || 11883,
+                geraete,
+                sprache: sp,
+                nameFn,
+                format: 'loxberry',
+                praefix: mqttBruecke.praefixBereinigen(formular.mqttPrefix || this.config.mqttPrefix),
+            });
+            datei = 'loxone/VIU_Miele_LoxBerry.xml';
         } else {
             const miniserver = String(formular.host || this.config.loxoneHost || '').trim();
             const eigene = (this.push && this.push.hostIp) || (miniserver && (await loxone.eigeneIp(miniserver)));
@@ -4912,9 +4929,13 @@ class MieleLocal extends utils.Adapter {
                 );
                 return;
             }
-            if (obj.command === 'loxoneTemplateIn' || obj.command === 'loxoneTemplateOut') {
+            if (
+                obj.command === 'loxoneTemplateIn' ||
+                obj.command === 'loxoneTemplateOut' ||
+                obj.command === 'loxoneTemplateMqtt'
+            ) {
                 const { url, datei, anzahl } = await this.loxoneVorlage(
-                    obj.command === 'loxoneTemplateIn' ? 'in' : 'out',
+                    { loxoneTemplateIn: 'in', loxoneTemplateOut: 'out', loxoneTemplateMqtt: 'mqtt' }[obj.command],
                     obj.message || {},
                 );
                 this.sendTo(

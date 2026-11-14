@@ -64,7 +64,7 @@ describe('Loxone', () => {
         expect(xml).to.include('\r\n');
         expect(xml).to.include('<VirtualInUdp Title="Miele" Comment="ioBroker.miele-local" Address="" Port="7001">');
         expect(xml).to.include('Check="miele/000187421679/status=\\v"');
-        expect(xml).to.include('Title="Pralka WWF664 Status"');
+        expect(xml).to.include('Title="Pralka WWF664 - Status"');
         expect(xml).to.include('Unit="&lt;v&gt; min"');
         // erstes Geraet: nur die zwei vorhandenen Werte, zweites: alle
         expect((xml.match(/miele\/000187421679\//g) || []).length).to.equal(2);
@@ -74,10 +74,42 @@ describe('Loxone', () => {
         expect(xml.trim().endsWith('</VirtualInUdp>')).to.equal(true);
     });
 
+    it('Kommentar: Erklaerung in der Sprache, mit Wertetabelle wo es eine gibt', () => {
+        expect(loxone.kommentar('status', 'pl', 1)).to.match(/^Stan pracy urządzenia\. .*5 = Pracuje/);
+        expect(loxone.kommentar('status', 'de', 1)).to.include('5 = In Betrieb');
+        expect(loxone.kommentar('programPhase', 'pl', 2)).to.include('514 = Suszenie');
+        expect(loxone.kommentar('dryingStep', 'pl', 2)).to.include('0 = Ekstra suche');
+        expect(loxone.kommentar('remainingMinutes', 'pl', 1)).to.equal(
+            'Czas do końca programu w minutach; 0, gdy nic nie pracuje.',
+        );
+        expect(loxone.kommentar('status', 'fr', 1)).to.match(/^Operating state\. /);
+        for (const [, sub] of loxone.WERTE) {
+            const k = loxone.kommentar(sub, 'pl', 1);
+            expect(k, sub).to.be.a('string').and.not.equal('');
+            expect(k.length, sub).to.be.below(1000);
+        }
+    });
+
+    it('Vorlage fuer das LoxBerry MQTT Gateway: "MQTT: <Thema>=", Port 11883, Praefix', () => {
+        const xml = loxone.vorlageEingaenge({
+            geraete: GERAETE,
+            sprache: 'pl',
+            format: 'loxberry',
+            praefix: 'haus/miele',
+        });
+        expect(xml).to.include('Title="Miele (LoxBerry MQTT)"');
+        expect(xml).to.include('Port="11883"');
+        expect(xml).to.include('Check="MQTT: haus/miele/000187421679/status=\\v"');
+        expect(xml).to.include('Comment="Stan pracy urządzenia. ');
+        const ohne = loxone.vorlageEingaenge({ geraete: GERAETE, format: 'loxberry' });
+        expect(ohne).to.include('Check="MQTT: miele/000187421679/status=\\v"');
+    });
+
     it('Namen der Eingaenge: Sprache, ohne Klammerzusatz, eigene Quelle geht vor', () => {
         expect(loxone.wertName('state', 'status', 'Status', 'pl')).to.equal('Status');
         expect(loxone.wertName('state', 'remainingMinutes', 'Remaining time', 'pl')).to.equal('Pozostały czas');
-        expect(loxone.wertName('eco', 'energy', 'Energy', 'pl')).to.equal('Energy');
+        expect(loxone.wertName('eco', 'energy', 'Energy', 'pl')).to.equal('Energia');
+        expect(loxone.wertName('eco', 'energy', 'Energy', 'fr')).to.equal('Energy');
         expect(loxone.wertName('state', 'status', 'Status', 'pl', () => 'Stan (x)')).to.equal('Stan');
     });
 
@@ -95,11 +127,7 @@ describe('Loxone', () => {
         empfang.on('message', m => {
             bekommen.push(m.toString('utf8'));
             if (bekommen.length === 3) {
-                expect(bekommen).to.deep.equal([
-                    'miele/0001/status=5',
-                    'miele/0001/status=7',
-                    'miele/0001/status=7',
-                ]);
+                expect(bekommen).to.deep.equal(['miele/0001/status=5', 'miele/0001/status=7', 'miele/0001/status=7']);
                 sender.stop();
                 empfang.close(done);
             }

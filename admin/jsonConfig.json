@@ -810,6 +810,21 @@
                     "lg": 6,
                     "xl": 6,
                     "help": "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on."
+                },
+                "loxoneTemplateMqtt": {
+                    "type": "sendTo",
+                    "command": "loxoneTemplateMqtt",
+                    "jsonData": "{ \"mqttPrefix\": \"${data.mqttPrefix}\" }",
+                    "openUrl": true,
+                    "newLine": true,
+                    "label": "Template for Loxone: UDP inputs of the LoxBerry MQTT Gateway",
+                    "variant": "contained",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "Writes VIU_Miele_LoxBerry.xml and opens it - save the file. One described input per numeric value of every appliance found, matching what the LoxBerry MQTT Gateway sends by UDP ('MQTT: <prefix>/<serial>/<value>=<number>', Miniserver port 11883). In Loxone Config: Virtual Inputs > Device templates > Import template. Texts do not fit a UDP input: the gateway sends them by HTTP to virtual text inputs named <prefix>_<serial>_<value>."
                 }
             }
         },

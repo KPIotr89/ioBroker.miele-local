@@ -155,5 +155,7 @@
   "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting.": "Broker zachowuje ostatnią wartość każdego tematu, więc odbiorca dostaje wszystko zaraz po połączeniu.",
   "Accept commands over MQTT": "Przyjmuj polecenia przez MQTT",
   "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on.": "Temat <prefiks>/<numer seryjny>/set/<polecenie> z dowolną treścią poza 0, false, off lub pustą (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Tylko przy włączonym sterowaniu.",
-  "MQTT": "MQTT"
+  "MQTT": "MQTT",
+  "Template for Loxone: UDP inputs of the LoxBerry MQTT Gateway": "Szablon dla Loxone: wejścia UDP z LoxBerry MQTT Gateway",
+  "Writes VIU_Miele_LoxBerry.xml and opens it - save the file. One described input per numeric value of every appliance found, matching what the LoxBerry MQTT Gateway sends by UDP ('MQTT: <prefix>/<serial>/<value>=<number>', Miniserver port 11883). In Loxone Config: Virtual Inputs > Device templates > Import template. Texts do not fit a UDP input: the gateway sends them by HTTP to virtual text inputs named <prefix>_<serial>_<value>.": "Zapisuje VIU_Miele_LoxBerry.xml i otwiera go - zapisz plik. Jedno opisane wejście na każdą wartość liczbową każdego znalezionego urządzenia, zgodne z tym, co LoxBerry MQTT Gateway wysyła przez UDP ('MQTT: <prefiks>/<numer seryjny>/<wartość>=<liczba>', port Miniservera 11883). W Loxone Config: Wejścia wirtualne > Szablony urządzeń > Importuj szablon. Teksty nie mieszczą się w wejściu UDP: gateway wysyła je przez HTTP do wirtualnych wejść tekstowych o nazwie <prefiks>_<numer seryjny>_<wartość>."
 }
