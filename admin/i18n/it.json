@@ -142,5 +142,18 @@
   "UDP port for commands": "UDP port for commands",
   "Template: virtual outputs (commands)": "Template: virtual outputs (commands)",
   "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template.": "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template.",
-  "Loxone": "Loxone"
+  "Loxone": "Loxone",
+  "Publishes all values of the appliances - including the texts (statusText, programText …) in the selected language - on an existing MQTT broker, one topic per value: <prefix>/<serial>/<value>. With LoxBerry: enter the LoxBerry address and the broker credentials shown in the MQTT Gateway widget, subscribe to <prefix>/# in the MQTT Gateway; texts reach the Miniserver as virtual text inputs.": "Publishes all values of the appliances - including the texts (statusText, programText …) in the selected language - on an existing MQTT broker, one topic per value: <prefix>/<serial>/<value>. With LoxBerry: enter the LoxBerry address and the broker credentials shown in the MQTT Gateway widget, subscribe to <prefix>/# in the MQTT Gateway; texts reach the Miniserver as virtual text inputs.",
+  "Publish values on an MQTT broker": "Publish values on an MQTT broker",
+  "Broker address": "Broker address",
+  "Broker port": "Broker port",
+  "User name": "User name",
+  "Password": "Password",
+  "Stored encrypted.": "Stored encrypted.",
+  "Topic prefix": "Topic prefix",
+  "Publish retained": "Publish retained",
+  "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting.": "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting.",
+  "Accept commands over MQTT": "Accept commands over MQTT",
+  "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on.": "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on.",
+  "MQTT": "MQTT"
 }

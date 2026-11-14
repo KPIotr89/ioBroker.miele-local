@@ -182,6 +182,23 @@ on, the adapter listens on a UDP port (default 18083) for `miele/<serial>/<comma
 `stop`, `pause`, `powerOn`, `powerOff`, `lightOn`, `lightOff`). Only datagrams from the configured
 Miniserver address are accepted. **Template: virtual outputs** writes the matching `VO_Miele.xml`.
 
+## MQTT (optional)
+
+The **MQTT** tab publishes every value of the appliances on an existing broker - **including the
+texts** (`statusText`, `programText` …) in the selected language, which a Loxone UDP input cannot
+take. One topic per value, retained by default:
+
+```
+<prefix>/<serial>/<value>        e.g. miele/000187421679/statusText = Pracuje
+<prefix>/connected               1 while the adapter runs, 0 otherwise (last will)
+<prefix>/<serial>/set/<command>  commands, with "Accept commands over MQTT" and "Enable control"
+```
+
+Published are all states under `state` and `eco` plus `info.connected`, `info.techType` and
+`info.deviceType`; booleans go as 1/0. With **LoxBerry**: enter the LoxBerry address and the
+broker credentials of the MQTT Gateway, subscribe to `<prefix>/#` there, and the gateway hands
+numbers and texts to the Miniserver.
+
 ## Network: ports, Docker, push
 
 | Direction | Port | Purpose | Required |
@@ -359,6 +376,7 @@ engineering work of the projects `MieleRESTServer` (akappner),
 <!--
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
+- (KPIotr89) New tab **MQTT**: built-in MQTT client publishing all values including the text states (`<prefix>/<serial>/<value>`), last will `<prefix>/connected`, optional commands under `<prefix>/<serial>/set/<command>`. Off by default
 - (KPIotr89) New tab **Loxone**: values go straight to a Loxone Miniserver as UDP datagrams (`miele/<serial>/<value>=<number>`), optional commands from the Miniserver by UDP, and templates for Loxone Config (`VIU_Miele.xml`, `VO_Miele.xml`). Off by default
 -->
 ### **WORK IN PROGRESS**

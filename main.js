@@ -52,6 +52,7 @@ const PAUSE_NACH_UEBERLASTUNG_MS = 60000;
 const { MielePushListener } = require('./lib/push');
 const enroll = require('./lib/enroll');
 const loxone = require('./lib/loxone');
+const mqttBruecke = require('./lib/mqttbruecke');
 const dop2 = require('./lib/dop2');
 const stats = require('./lib/stats');
 const { mussNachziehen } = require('./lib/objektabgleich');
@@ -373,6 +374,8 @@ class MieleLocal extends utils.Adapter {
 
         // Werte direkt an einen Loxone Miniserver (optional) - siehe lib/loxone.js
         await this.loxoneStarten();
+        // Werte samt Texten an einen MQTT-Broker (optional) - siehe lib/mqttbruecke.js
+        await this.mqttStarten();
 
         // Push-Listener + Enrollment
         if (this.config.usePush) {
@@ -4324,6 +4327,7 @@ class MieleLocal extends utils.Adapter {
         if (state && state.ack) {
             // bestaetigte Werte der eigenen Datenpunkte: nur fuer Loxone von Belang
             this.loxoneWert(id, state);
+            this.mqttWert(id, state);
             return;
         }
         if (!state) {
@@ -4592,19 +4596,100 @@ class MieleLocal extends utils.Adapter {
                 port: Number(this.config.loxoneCommandPort) || 18083,
                 erlaubt: host,
                 log: this.log,
-                beiBefehl: (deviceId, befehl) => {
-                    if (!this.devices || !this.devices[deviceId]) {
-                        this.log.debug(`Loxone command for unknown appliance ${deviceId}`);
-                        return;
-                    }
-                    this.log.info(`Loxone command: ${deviceId} ${befehl}`);
-                    // Derselbe Weg wie ein Klick im Admin: control.<Befehl> ohne ack
-                    this.setStateAsync(`${deviceId}.control.${befehl}`, { val: true, ack: false }).catch(e =>
-                        this.log.warn(`Loxone command ${deviceId} ${befehl}: ${e.message}`),
-                    );
-                },
+                beiBefehl: (deviceId, befehl) => this.fernBefehl('Loxone', deviceId, befehl),
             });
             this.loxoneEmpfang.start();
+        }
+    }
+
+    /**
+     * Einen Befehl von aussen (Loxone per UDP, MQTT) ausfuehren.
+     *
+     * Derselbe Weg wie ein Klick im Admin: control.<Befehl> ohne ack - Pruefung, Ausfuehrung
+     * und Quittung liegen damit an einer einzigen Stelle (lib/befehle.js).
+     *
+     * @param {string} quelle "Loxone" oder "MQTT", fuer das Protokoll
+     * @param {string} deviceId Seriennummer
+     * @param {string} befehl start, stop, pause, powerOn, powerOff, lightOn, lightOff
+     */
+    fernBefehl(quelle, deviceId, befehl) {
+        if (!this.devices || !this.devices[deviceId]) {
+            this.log.debug(`${quelle} command for unknown appliance ${deviceId}`);
+            return;
+        }
+        this.log.info(`${quelle} command: ${deviceId} ${befehl}`);
+        this.setStateAsync(`${deviceId}.control.${befehl}`, { val: true, ack: false }).catch(e =>
+            this.log.warn(`${quelle} command ${deviceId} ${befehl}: ${e.message}`),
+        );
+    }
+
+    /**
+     * MQTT-Client starten (Einstellung mqttEnabled, Standard aus).
+     *
+     * Wie bei Loxone ueber das Abonnement der eigenen Datenpunkte - hier mit allen Werten aus
+     * state und eco, also auch den Texten.
+     */
+    async mqttStarten() {
+        if (!this.config.mqttEnabled) {
+            return;
+        }
+        const host = String(this.config.mqttHost || '').trim();
+        if (!host) {
+            this.log.warn('MQTT: no broker address configured - nothing is published.');
+            return;
+        }
+        const befehle = !!this.config.mqttCommands;
+        if (befehle && !this.config.allowControl) {
+            this.log.warn('MQTT: commands need "Allow control" - they are ignored.');
+        }
+        this.mqtt = new mqttBruecke.Bruecke({
+            host,
+            port: Number(this.config.mqttPort) || 1883,
+            user: this.config.mqttUser,
+            password: this.config.mqttPassword,
+            praefix: this.config.mqttPrefix,
+            retain: this.config.mqttRetain !== false,
+            befehle: befehle && !!this.config.allowControl,
+            clientId: `iobroker-${this.namespace.replace(/[^a-zA-Z0-9]/g, '-')}`,
+            log: this.log,
+            beiBefehl: (deviceId, befehl) => this.fernBefehl('MQTT', deviceId, befehl),
+            beiVerbindung: () => this.mqttAlles().catch(e => this.log.debug(`MQTT: ${e.message}`)),
+        });
+        await this.subscribeStatesAsync('*.state.*');
+        await this.subscribeStatesAsync('*.eco.*');
+        await this.subscribeStatesAsync('*.info.*');
+        this.mqtt.start();
+    }
+
+    /**
+     * Einen bestaetigten Wert veroeffentlichen, wenn er dazugehoert.
+     *
+     * @param {string} id volle ID des Datenpunkts
+     * @param {ioBroker.State} state Wert
+     */
+    mqttWert(id, state) {
+        if (!this.mqtt) {
+            return;
+        }
+        // miele-local.0.<serial>.<kanal>.<sub>
+        const teile = id.split('.');
+        if (teile.length !== 5 || !mqttBruecke.istWert(teile[3], teile[4])) {
+            return;
+        }
+        this.mqtt.sende(teile[2], teile[4], state.val);
+    }
+
+    /** Alle Werte aller Geraete veroeffentlichen - nach jedem Verbindungsaufbau. */
+    async mqttAlles() {
+        for (const deviceId of Object.keys(this.devices || {})) {
+            for (const kanal of ['info', 'state', 'eco']) {
+                const alle = (await this.getStatesAsync(`${deviceId}.${kanal}.*`)) || {};
+                for (const [id, s] of Object.entries(alle)) {
+                    if (s && this.mqtt) {
+                        this.mqttWert(id, s);
+                    }
+                }
+            }
         }
     }
 
@@ -5131,6 +5216,10 @@ class MieleLocal extends utils.Adapter {
                 this.clearTimeout(this.loxoneTimer);
             }
             this.loxoneStoppen();
+            if (this.mqtt) {
+                this.mqtt.stop();
+                this.mqtt = null;
+            }
             if (this.push) {
                 await this.push.stop();
             }

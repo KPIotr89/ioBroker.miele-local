@@ -142,5 +142,18 @@
   "UDP port for commands": "UDP-Port für Befehle",
   "Template: virtual outputs (commands)": "Vorlage: virtuelle Ausgänge (Befehle)",
   "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template.": "Schreibt VO_Miele.xml mit einem Ausgang je Befehl und öffnet sie - Datei speichern. In Loxone Config: Virtuelle Ausgänge > Vordefinierte Geräte > Vorlage importieren.",
-  "Loxone": "Loxone"
+  "Loxone": "Loxone",
+  "Publishes all values of the appliances - including the texts (statusText, programText …) in the selected language - on an existing MQTT broker, one topic per value: <prefix>/<serial>/<value>. With LoxBerry: enter the LoxBerry address and the broker credentials shown in the MQTT Gateway widget, subscribe to <prefix>/# in the MQTT Gateway; texts reach the Miniserver as virtual text inputs.": "Veröffentlicht alle Werte der Geräte - auch die Texte (statusText, programText …) in der gewählten Sprache - auf einem vorhandenen MQTT-Broker, je Wert ein Thema: <Präfix>/<Seriennummer>/<Wert>. Mit LoxBerry: Adresse des LoxBerry und die Broker-Zugangsdaten aus dem MQTT-Gateway-Widget eintragen, im MQTT Gateway <Präfix>/# abonnieren; Texte erreichen den Miniserver als virtuelle Texteingänge.",
+  "Publish values on an MQTT broker": "Werte auf einem MQTT-Broker veröffentlichen",
+  "Broker address": "Adresse des Brokers",
+  "Broker port": "Port des Brokers",
+  "User name": "Benutzername",
+  "Password": "Kennwort",
+  "Stored encrypted.": "Wird verschlüsselt gespeichert.",
+  "Topic prefix": "Themenpräfix",
+  "Publish retained": "Mit Retain veröffentlichen",
+  "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting.": "Der Broker behält den letzten Wert je Thema; ein Abnehmer bekommt nach dem Verbinden sofort alles.",
+  "Accept commands over MQTT": "Befehle über MQTT annehmen",
+  "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on.": "Thema <Präfix>/<Seriennummer>/set/<Befehl> mit beliebigem Inhalt außer 0, false, off oder leer (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Nur mit eingeschalteter Steuerung.",
+  "MQTT": "MQTT"
 }

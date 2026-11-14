@@ -171,12 +171,14 @@
   },
   "encryptedNative": [
     "groupKey",
-    "refreshToken"
+    "refreshToken",
+    "mqttPassword"
   ],
   "protectedNative": [
     "groupKey",
     "refreshToken",
-    "groupId"
+    "groupId",
+    "mqttPassword"
   ],
   "native": {
     "country": "de",
@@ -199,6 +201,14 @@
     "loxonePort": 7000,
     "loxoneCommands": false,
     "loxoneCommandPort": 18083,
+    "mqttEnabled": false,
+    "mqttHost": "",
+    "mqttPort": 1883,
+    "mqttUser": "",
+    "mqttPassword": "",
+    "mqttPrefix": "miele",
+    "mqttRetain": true,
+    "mqttCommands": false,
     "ecoFeedback": true,
     "ecoRawFields": false,
     "leafStates": true,

@@ -142,5 +142,18 @@
   "UDP port for commands": "Port UDP dla poleceń",
   "Template: virtual outputs (commands)": "Szablon: wyjścia wirtualne (polecenia)",
   "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template.": "Zapisuje VO_Miele.xml z jednym wyjściem na każde polecenie i otwiera go - zapisz plik. W Loxone Config: Wyjścia wirtualne > Szablony urządzeń > Importuj szablon.",
-  "Loxone": "Loxone"
+  "Loxone": "Loxone",
+  "Publishes all values of the appliances - including the texts (statusText, programText …) in the selected language - on an existing MQTT broker, one topic per value: <prefix>/<serial>/<value>. With LoxBerry: enter the LoxBerry address and the broker credentials shown in the MQTT Gateway widget, subscribe to <prefix>/# in the MQTT Gateway; texts reach the Miniserver as virtual text inputs.": "Publikuje wszystkie wartości urządzeń - także teksty (statusText, programText …) w wybranym języku - na istniejącym brokerze MQTT, jeden temat na wartość: <prefiks>/<numer seryjny>/<wartość>. Z LoxBerry: wpisz adres LoxBerry i dane logowania brokera z widżetu MQTT Gateway, w MQTT Gateway zasubskrybuj <prefiks>/#; teksty trafiają do Miniservera jako wirtualne wejścia tekstowe.",
+  "Publish values on an MQTT broker": "Publikuj wartości na brokerze MQTT",
+  "Broker address": "Adres brokera",
+  "Broker port": "Port brokera",
+  "User name": "Nazwa użytkownika",
+  "Password": "Hasło",
+  "Stored encrypted.": "Przechowywane w postaci zaszyfrowanej.",
+  "Topic prefix": "Prefiks tematów",
+  "Publish retained": "Publikuj z flagą retain",
+  "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting.": "Broker zachowuje ostatnią wartość każdego tematu, więc odbiorca dostaje wszystko zaraz po połączeniu.",
+  "Accept commands over MQTT": "Przyjmuj polecenia przez MQTT",
+  "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on.": "Temat <prefiks>/<numer seryjny>/set/<polecenie> z dowolną treścią poza 0, false, off lub pustą (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Tylko przy włączonym sterowaniu.",
+  "MQTT": "MQTT"
 }

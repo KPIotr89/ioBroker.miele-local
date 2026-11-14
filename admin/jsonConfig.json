@@ -712,6 +712,107 @@
                 }
             }
         },
+        "tabMqtt": {
+            "type": "panel",
+            "label": "MQTT",
+            "items": {
+                "_mqttIntro": {
+                    "type": "staticText",
+                    "text": "Publishes all values of the appliances - including the texts (statusText, programText …) in the selected language - on an existing MQTT broker, one topic per value: <prefix>/<serial>/<value>. With LoxBerry: enter the LoxBerry address and the broker credentials shown in the MQTT Gateway widget, subscribe to <prefix>/# in the MQTT Gateway; texts reach the Miniserver as virtual text inputs.",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12
+                },
+                "mqttEnabled": {
+                    "type": "checkbox",
+                    "label": "Publish values on an MQTT broker",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6
+                },
+                "mqttHost": {
+                    "type": "text",
+                    "label": "Broker address",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "mqttPort": {
+                    "type": "number",
+                    "label": "Broker port",
+                    "default": 1883,
+                    "min": 1,
+                    "max": 65535,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "mqttUser": {
+                    "type": "text",
+                    "label": "User name",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "mqttPassword": {
+                    "type": "password",
+                    "label": "Password",
+                    "visible": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4,
+                    "help": "Stored encrypted."
+                },
+                "mqttPrefix": {
+                    "type": "text",
+                    "label": "Topic prefix",
+                    "default": "miele",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "mqttRetain": {
+                    "type": "checkbox",
+                    "label": "Publish retained",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "The broker keeps the last value of each topic, so a subscriber gets everything right after connecting."
+                },
+                "mqttCommands": {
+                    "type": "checkbox",
+                    "label": "Accept commands over MQTT",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "Topic <prefix>/<serial>/set/<command> with any payload except 0, false, off or empty (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only with 'Enable control' switched on."
+                }
+            }
+        },
         "tabHistory": {
             "type": "panel",
             "label": "History",
