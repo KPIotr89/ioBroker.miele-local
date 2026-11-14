@@ -129,5 +129,18 @@
   "Nederlands": "Nederlands",
   "Русский": "Русский",
   "Українська": "Українська",
-  "简体中文": "简体中文"
+  "简体中文": "简体中文",
+  "Sends the values straight to a Loxone Miniserver as UDP datagrams (miele/<serial>/<value>=<number>) - no MQTT and no further adapter needed. Import the templates below into Loxone Config. Texts cannot be sent to a UDP input; a Status block in Loxone turns the number into text.": "Wysyła wartości bezpośrednio do Loxone Miniservera jako datagramy UDP (miele/<numer seryjny>/<wartość>=<liczba>) - bez MQTT i bez dodatkowego adaptera. Szablony poniżej zaimportuj w Loxone Config. Wejście UDP nie przyjmuje tekstów; liczbę na tekst zamienia w Loxone blok Status.",
+  "Send values to a Loxone Miniserver": "Wysyłaj wartości do Loxone Miniservera",
+  "Miniserver IP address": "Adres IP Miniservera",
+  "UDP port of the virtual input": "Port UDP wejścia wirtualnego",
+  "Must match the port of the virtual UDP input in Loxone Config; the template carries this value. Everything is sent on change and again every 5 minutes.": "Musi zgadzać się z portem wirtualnego wejścia UDP w Loxone Config; szablon zawiera tę wartość. Wysyłane jest przy każdej zmianie oraz dodatkowo wszystko co 5 minut.",
+  "Template: virtual UDP inputs": "Szablon: wirtualne wejścia UDP",
+  "Writes VIU_Miele.xml with one input per value of every appliance found and opens it - save the file. In Loxone Config: Virtual Inputs > Device templates > Import template. The instance must be running.": "Zapisuje VIU_Miele.xml z jednym wejściem na każdą wartość każdego znalezionego urządzenia i otwiera go - zapisz plik. W Loxone Config: Wejścia wirtualne > Szablony urządzeń > Importuj szablon. Instancja musi być uruchomiona.",
+  "Accept commands from the Miniserver": "Przyjmuj polecenia z Miniservera",
+  "The Miniserver sends miele/<serial>/<command> by UDP to this adapter (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only datagrams from the Miniserver address above are accepted, and only with 'Enable control' switched on.": "Miniserver wysyła miele/<numer seryjny>/<polecenie> przez UDP do tego adaptera (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Przyjmowane są tylko datagramy z podanego wyżej adresu Miniservera i tylko przy włączonym sterowaniu.",
+  "UDP port for commands": "Port UDP dla poleceń",
+  "Template: virtual outputs (commands)": "Szablon: wyjścia wirtualne (polecenia)",
+  "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template.": "Zapisuje VO_Miele.xml z jednym wyjściem na każde polecenie i otwiera go - zapisz plik. W Loxone Config: Wyjścia wirtualne > Szablony urządzeń > Importuj szablon.",
+  "Loxone": "Loxone"
 }

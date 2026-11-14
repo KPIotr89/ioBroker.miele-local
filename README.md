@@ -160,6 +160,28 @@ every step is logged with resource, HTTP status and the answer as hex (no keys).
 
 Every field carries its explanation underneath it in the admin; this page does not repeat them.
 
+## Loxone (optional)
+
+The **Loxone** tab sends the values straight to a Miniserver as UDP datagrams - no MQTT, no
+further adapter. One datagram per value, on every change and all of them again every 5 minutes:
+
+```
+miele/<serial>/<value>=<number>        e.g. miele/000187421679/status=5
+```
+
+Sent are `connected`, `status`, `programId`, `programType`, `programPhase`, the times in minutes,
+`progress`, temperatures, `spinningSpeed`, `dryingStep`, the signal flags, `mobileStart`, `light`
+and the eco values. Booleans go as 1/0. Texts cannot be sent to a UDP input - a Status block in
+Loxone turns the number into text.
+
+**Template: virtual UDP inputs** writes `VIU_Miele.xml` with one input per value of every
+appliance found; import it in Loxone Config (Virtual Inputs → Device templates → Import template).
+
+**Commands (optional).** With *Accept commands from the Miniserver* and *Enable control* switched
+on, the adapter listens on a UDP port (default 18083) for `miele/<serial>/<command>` (`start`,
+`stop`, `pause`, `powerOn`, `powerOff`, `lightOn`, `lightOff`). Only datagrams from the configured
+Miniserver address are accepted. **Template: virtual outputs** writes the matching `VO_Miele.xml`.
+
 ## Network: ports, Docker, push
 
 | Direction | Port | Purpose | Required |
@@ -337,6 +359,7 @@ engineering work of the projects `MieleRESTServer` (akappner),
 <!--
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
+- (KPIotr89) New tab **Loxone**: values go straight to a Loxone Miniserver as UDP datagrams (`miele/<serial>/<value>=<number>`), optional commands from the Miniserver by UDP, and templates for Loxone Config (`VIU_Miele.xml`, `VO_Miele.xml`). Off by default
 -->
 ### **WORK IN PROGRESS**
 - (KPIotr89) New option **Language of the text states** (Polling & values): `statusText`, `programText`, `programPhaseText`, `programTypeText`, `dryingStepText` and the value lists of the raw states in any of the eleven admin languages. Default unchanged (German or English, following "State names in German"); missing translations fall back to English

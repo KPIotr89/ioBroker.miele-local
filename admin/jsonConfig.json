@@ -610,6 +610,108 @@
                 }
             }
         },
+        "tabLoxone": {
+            "type": "panel",
+            "label": "Loxone",
+            "items": {
+                "_loxIntro": {
+                    "type": "staticText",
+                    "text": "Sends the values straight to a Loxone Miniserver as UDP datagrams (miele/<serial>/<value>=<number>) - no MQTT and no further adapter needed. Import the templates below into Loxone Config. Texts cannot be sent to a UDP input; a Status block in Loxone turns the number into text.",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 12,
+                    "lg": 12,
+                    "xl": 12
+                },
+                "loxoneEnabled": {
+                    "type": "checkbox",
+                    "label": "Send values to a Loxone Miniserver",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6
+                },
+                "loxoneHost": {
+                    "type": "text",
+                    "label": "Miniserver IP address",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "loxonePort": {
+                    "type": "number",
+                    "label": "UDP port of the virtual input",
+                    "default": 7000,
+                    "min": 1,
+                    "max": 65535,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4,
+                    "help": "Must match the port of the virtual UDP input in Loxone Config; the template carries this value. Everything is sent on change and again every 5 minutes."
+                },
+                "loxoneTemplateIn": {
+                    "type": "sendTo",
+                    "command": "loxoneTemplateIn",
+                    "jsonData": "{ \"host\": \"${data.loxoneHost}\", \"port\": \"${data.loxonePort}\", \"commandPort\": \"${data.loxoneCommandPort}\" }",
+                    "openUrl": true,
+                    "newLine": true,
+                    "label": "Template: virtual UDP inputs",
+                    "variant": "contained",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "Writes VIU_Miele.xml with one input per value of every appliance found and opens it - save the file. In Loxone Config: Virtual Inputs > Device templates > Import template. The instance must be running."
+                },
+                "loxoneCommands": {
+                    "type": "checkbox",
+                    "label": "Accept commands from the Miniserver",
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "The Miniserver sends miele/<serial>/<command> by UDP to this adapter (start, stop, pause, powerOn, powerOff, lightOn, lightOff). Only datagrams from the Miniserver address above are accepted, and only with 'Enable control' switched on."
+                },
+                "loxoneCommandPort": {
+                    "type": "number",
+                    "label": "UDP port for commands",
+                    "default": 18083,
+                    "min": 1024,
+                    "max": 65535,
+                    "newLine": true,
+                    "xs": 12,
+                    "sm": 6,
+                    "md": 4,
+                    "lg": 4,
+                    "xl": 4
+                },
+                "loxoneTemplateOut": {
+                    "type": "sendTo",
+                    "command": "loxoneTemplateOut",
+                    "jsonData": "{ \"host\": \"${data.loxoneHost}\", \"port\": \"${data.loxonePort}\", \"commandPort\": \"${data.loxoneCommandPort}\" }",
+                    "openUrl": true,
+                    "newLine": true,
+                    "label": "Template: virtual outputs (commands)",
+                    "variant": "outlined",
+                    "xs": 12,
+                    "sm": 12,
+                    "md": 6,
+                    "lg": 6,
+                    "xl": 6,
+                    "help": "Writes VO_Miele.xml with one output per command and opens it - save the file. In Loxone Config: Virtual Outputs > Device templates > Import template."
+                }
+            }
+        },
         "tabHistory": {
             "type": "panel",
             "label": "History",

@@ -51,6 +51,7 @@ const PAUSE_ZWISCHEN_DURCHGAENGEN_MS = 60000;
 const PAUSE_NACH_UEBERLASTUNG_MS = 60000;
 const { MielePushListener } = require('./lib/push');
 const enroll = require('./lib/enroll');
+const loxone = require('./lib/loxone');
 const dop2 = require('./lib/dop2');
 const stats = require('./lib/stats');
 const { mussNachziehen } = require('./lib/objektabgleich');
@@ -369,6 +370,9 @@ class MieleLocal extends utils.Adapter {
         // Erst Altlasten schliessen, dann abonnieren - siehe lib/befehle.js offeneSchliessen().
         await befehle.offeneSchliessen(this);
         await this.subscribeStatesAsync('*.control.*');
+
+        // Werte direkt an einen Loxone Miniserver (optional) - siehe lib/loxone.js
+        await this.loxoneStarten();
 
         // Push-Listener + Enrollment
         if (this.config.usePush) {
@@ -4317,7 +4321,12 @@ class MieleLocal extends utils.Adapter {
     }
 
     async onStateChange(id, state) {
-        if (!state || state.ack) {
+        if (state && state.ack) {
+            // bestaetigte Werte der eigenen Datenpunkte: nur fuer Loxone von Belang
+            this.loxoneWert(id, state);
+            return;
+        }
+        if (!state) {
             return;
         } // nur echte Nutzerbefehle
         const parts = id.split('.'); // miele-local.0.<serial>.control.<sub>
@@ -4547,6 +4556,198 @@ class MieleLocal extends utils.Adapter {
     }
 
     // --- Admin-Nachrichten (OAuth-Login) ---
+    /**
+     * Anbindung an den Loxone Miniserver starten (Einstellung loxoneEnabled, Standard aus).
+     *
+     * Abonniert die eigenen Wert-Datenpunkte: So geht jeder Wert an den Miniserver, gleich auf
+     * welchem Weg er entstanden ist (Abfrage, Push, Berechnung) - ohne dass jede Schreibstelle
+     * davon wissen muss.
+     */
+    async loxoneStarten() {
+        const host = String(this.config.loxoneHost || '').trim();
+        if (!this.config.loxoneEnabled) {
+            return;
+        }
+        if (!host) {
+            this.log.warn('Loxone: no Miniserver address configured - nothing is sent.');
+            return;
+        }
+        const port = Number(this.config.loxonePort) || 7000;
+        this.loxone = new loxone.Sender({ host, port, log: this.log });
+        await this.subscribeStatesAsync('*.state.*');
+        await this.subscribeStatesAsync('*.eco.*');
+        await this.subscribeStatesAsync('*.info.connected');
+        this.log.info(`Loxone: values are sent to ${host}, UDP port ${port}.`);
+        // Alles in festem Abstand: UDP kennt keine Quittung, ein neu gestarteter Miniserver
+        // haette sonst leere Eingaenge, bis sich ein Wert aendert.
+        this.schleife('loxoneTimer', () => this.loxoneAlles(), 5 * 60 * 1000);
+        this.setTimeout(() => this.loxoneAlles().catch(() => {}), 15000);
+
+        if (this.config.loxoneCommands) {
+            if (!this.config.allowControl) {
+                this.log.warn('Loxone: commands need "Allow control" - the command port stays closed.');
+                return;
+            }
+            this.loxoneEmpfang = new loxone.Empfaenger({
+                port: Number(this.config.loxoneCommandPort) || 18083,
+                erlaubt: host,
+                log: this.log,
+                beiBefehl: (deviceId, befehl) => {
+                    if (!this.devices || !this.devices[deviceId]) {
+                        this.log.debug(`Loxone command for unknown appliance ${deviceId}`);
+                        return;
+                    }
+                    this.log.info(`Loxone command: ${deviceId} ${befehl}`);
+                    // Derselbe Weg wie ein Klick im Admin: control.<Befehl> ohne ack
+                    this.setStateAsync(`${deviceId}.control.${befehl}`, { val: true, ack: false }).catch(e =>
+                        this.log.warn(`Loxone command ${deviceId} ${befehl}: ${e.message}`),
+                    );
+                },
+            });
+            this.loxoneEmpfang.start();
+        }
+    }
+
+    /** Anbindung an den Miniserver beenden. */
+    loxoneStoppen() {
+        if (this.loxone) {
+            this.loxone.stop();
+            this.loxone = null;
+        }
+        if (this.loxoneEmpfang) {
+            this.loxoneEmpfang.stop();
+            this.loxoneEmpfang = null;
+        }
+    }
+
+    /**
+     * Einen bestaetigten Wert an den Miniserver weitergeben, wenn er dazugehoert.
+     *
+     * @param {string} id volle ID des Datenpunkts
+     * @param {ioBroker.State} state Wert
+     */
+    loxoneWert(id, state) {
+        if (!this.loxone) {
+            return;
+        }
+        // miele-local.0.<serial>.<kanal>.<sub>
+        const teile = id.split('.');
+        if (teile.length !== 5 || !loxone.istWert(teile[3], teile[4])) {
+            return;
+        }
+        this.loxone.sende(teile[2], teile[4], state.val);
+    }
+
+    /** Alle Werte aller Geraete an den Miniserver senden, auch unveraenderte. */
+    async loxoneAlles() {
+        if (!this.loxone) {
+            return;
+        }
+        for (const deviceId of Object.keys(this.devices || {})) {
+            for (const [kanal, sub] of loxone.WERTE) {
+                const s = await this.getStateAsync(`${deviceId}.${kanal}.${sub}`);
+                if (s && this.loxone) {
+                    this.loxone.sende(deviceId, sub, s.val, true);
+                }
+            }
+        }
+    }
+
+    /**
+     * Vorlage fuer Loxone Config schreiben und ihre Adresse liefern.
+     *
+     * Die Angaben kommen aus dem Formular (noch nicht gespeichert) oder aus der Konfiguration.
+     *
+     * @param {'in'|'out'} art virtuelle UDP-Eingaenge oder virtuelle Ausgaenge
+     * @param {{host?: string, port?: number|string, commandPort?: number|string}} [formular] Formularwerte
+     * @returns {Promise<{url: string, datei: string, anzahl: number}>} Adresse, Dateiname, Zahl der Eintraege
+     */
+    async loxoneVorlage(art, formular = {}) {
+        const sp = this.textSprache() || (await this.systemSprache());
+        const geraete = [];
+        for (const deviceId of Object.keys(this.devices || {})) {
+            let name = deviceId;
+            try {
+                const o = await this.getObjectAsync(deviceId);
+                const n = o && o.common && o.common.name;
+                name = (typeof n === 'string' ? n : n && (n[sp] || n.en)) || deviceId;
+            } catch {
+                /* dann eben die Seriennummer */
+            }
+            // "Pralka - WWF664 (000187421679)" -> "Pralka WWF664"
+            name = name
+                .replace(/\s*\([^)]*\)\s*$/, '')
+                .replace(/\s+-\s+/, ' ')
+                .trim();
+            const vorhanden = new Set();
+            for (const [kanal, sub] of loxone.WERTE) {
+                if (await this.getObjectAsync(`${deviceId}.${kanal}.${sub}`)) {
+                    vorhanden.add(`${kanal}.${sub}`);
+                }
+            }
+            geraete.push({ id: deviceId, name: name || deviceId, vorhanden });
+        }
+        if (!geraete.length) {
+            throw new Error('No appliances found yet - the template would be empty.');
+        }
+        // gleiche Namen (zwei gleiche Geraete) durch die Seriennummer unterscheiden
+        for (const g of geraete) {
+            if (geraete.filter(x => x.name === g.name).length > 1) {
+                g.name = `${g.name} ${g.id.slice(-4)}`;
+            }
+        }
+        let text;
+        let datei;
+        if (art === 'in') {
+            text = loxone.vorlageEingaenge({
+                port: Number(formular.port) || Number(this.config.loxonePort) || 7000,
+                geraete,
+                sprache: sp,
+                nameFn: (kanal, sub, en) => {
+                    const n = objdef.nameFor(kanal, sub, en, true);
+                    return typeof n === 'string' ? n : n[sp] || n.en;
+                },
+            });
+            datei = 'loxone/VIU_Miele.xml';
+        } else {
+            const miniserver = String(formular.host || this.config.loxoneHost || '').trim();
+            const eigene = (this.push && this.push.hostIp) || (miniserver && (await loxone.eigeneIp(miniserver)));
+            if (!eigene) {
+                throw new Error('Enter the Miniserver address first - it is needed to find the ioBroker address.');
+            }
+            text = loxone.vorlageAusgaenge({
+                host: eigene,
+                port: Number(formular.commandPort) || Number(this.config.loxoneCommandPort) || 18083,
+                geraete,
+            });
+            datei = 'loxone/VO_Miele.xml';
+        }
+        await this.setForeignObjectNotExistsAsync(this.namespace, {
+            type: 'meta',
+            common: { name: 'Dateien', type: 'meta.user' },
+            native: {},
+        });
+        await this.writeFileAsync(this.namespace, datei, text);
+        const anzahl = (text.match(/<Virtual(InUdp|Out)Cmd /g) || []).length;
+        this.log.info(`Loxone template written: ${datei} (${anzahl} entries)`);
+        return { url: `/files/${this.namespace}/${datei}`, datei, anzahl };
+    }
+
+    /**
+     * Systemsprache von ioBroker.
+     *
+     * @returns {Promise<string>} eine der elf Sprachen, sonst "en"
+     */
+    async systemSprache() {
+        try {
+            const o = await this.getForeignObjectAsync('system.config');
+            const sp = o && o.common && o.common.language;
+            return namen.SPRACHEN.includes(sp) ? sp : 'en';
+        } catch {
+            return 'en';
+        }
+    }
+
     async onMessage(obj) {
         if (!obj || !obj.command) {
             return;
@@ -4622,6 +4823,19 @@ class MieleLocal extends utils.Adapter {
                             group: d.txt.group,
                         })),
                     },
+                    obj.callback,
+                );
+                return;
+            }
+            if (obj.command === 'loxoneTemplateIn' || obj.command === 'loxoneTemplateOut') {
+                const { url, datei, anzahl } = await this.loxoneVorlage(
+                    obj.command === 'loxoneTemplateIn' ? 'in' : 'out',
+                    obj.message || {},
+                );
+                this.sendTo(
+                    obj.from,
+                    obj.command,
+                    { openUrl: url, saveConfig: false, result: `${anzahl} entries in ${datei}` },
                     obj.callback,
                 );
                 return;
@@ -4913,6 +5127,10 @@ class MieleLocal extends utils.Adapter {
             if (this.uhrTimer) {
                 this.clearTimeout(this.uhrTimer);
             }
+            if (this.loxoneTimer) {
+                this.clearTimeout(this.loxoneTimer);
+            }
+            this.loxoneStoppen();
             if (this.push) {
                 await this.push.stop();
             }
