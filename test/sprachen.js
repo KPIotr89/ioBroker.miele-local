@@ -154,7 +154,12 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
                     expect(t, `${dt}/${k} ${sp}`).to.be.a('string').and.not.equal('');
                     if (sp !== 'de' && sp !== 'en') {
                         const ha = HA[sp].program[schluessel];
-                        const eigen = PROGRAMME[sp] && PROGRAMME[sp].program[schluessel];
+                        const jeCode = PROGRAMME[sp] && (PROGRAMME[sp].programNachCode || {})[m.program];
+                        const eigen = (jeCode && jeCode[k]) || (PROGRAMME[sp] && PROGRAMME[sp].program[schluessel]);
+                        if (jeCode && jeCode[k]) {
+                            expect(t).to.equal(jeCode[k]);
+                            continue;
+                        }
                         expect(t).to.equal(ha || eigen || werte.wertText('program', 'en', Number(dt), Number(k)));
                     }
                 }
@@ -164,6 +169,10 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         expect(werte.wertText('program', 'fr', 1, 1)).to.equal('Coton');
         expect(werte.wertText('program', 'uk', 1, 1)).to.equal('Cottons');
         expect(werte.wertText('program', 'pl', 1, 1)).to.equal('Bawełna');
+        // derselbe Bezeichner, je Geraet ein anderer Name: Rohwert 123 der Waschmaschine
+        expect(werte.wertText('program', 'pl', 1, 123)).to.equal('Ciemne/Jeans');
+        expect(werte.wertText('program', 'pl', 1, 24)).to.equal('Jeans');
+        expect(werte.wertText('program', 'pl', 2, 13)).to.equal('Jeans');
     });
 
     it('eigene Programmnamen (PROGRAMME) gehoeren zu Bezeichnern, die es gibt', () => {
