@@ -190,7 +190,7 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         expect(text('ProgramPhase', 256, pl, 'programPhaseText')).to.equal('Nie uruchomiony');
         expect(text('DryingStep', 0, { deviceType: 2, sprache: 'pl' }, 'dryingStepText')).to.equal('Ekstra suche');
         // keine polnische Uebersetzung: englischer Name, unbekannter Rohwert: Ersatztext
-        expect(text('ProgramID', 10059, pl, 'programText')).to.equal('Pre ironing');
+        expect(text('ProgramID', 10066, pl, 'programText')).to.equal('Trainers refresh');
         expect(text('ProgramID', 99999, pl, 'programText')).to.equal('Program 99999');
         // de/en erzwingen die Sprache, unabhaengig von germanNames
         expect(text('Status', 5, { deviceType: 1, german: true, sprache: 'en' }, 'statusText')).to.equal('In use');
