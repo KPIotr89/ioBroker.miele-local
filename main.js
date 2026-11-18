@@ -1167,7 +1167,7 @@ class MieleLocal extends utils.Adapter {
             if (this.config.ecoFeedback) {
                 await this.ecoEndspurtPruefen(deviceId, statusVal);
             }
-            if (dev.ecoLaeuft && !laeuftJetzt) {
+            if (dev.ecoLaeuft && !laeuftJetzt && !this.ecoNichtsMehrZuHolen(deviceId)) {
                 dev.ecoNachlaufBis = Date.now() + ecoRegel.NACHLAUF_MS;
                 dev.ecoStabil = 0;
                 this.log.debug(
@@ -2533,9 +2533,37 @@ class MieleLocal extends utils.Adapter {
         return Math.min(begrenzt * einheitMs, TIMER_MAX_MS);
     }
 
+    /**
+     * Gibt es bei diesem Geraet nichts mehr zu holen?
+     *
+     * Wahr, wenn das Eco-Leaf (2/6195) UND beide Kontext-Leafs (2/1585, 2/391) dreimal mit
+     * "kenne ich nicht" abgesagt haben. pollEco fragt dann ohnehin nichts mehr ab - Endspurt-
+     * Takt und Schlussablesung wuerden nur Logzeilen ohne jede Anfrage erzeugen (Forum 15.11.,
+     * WWG760: "final phase ... reading every 60 s" nach "no longer queried").
+     *
+     * @param deviceId Geraete-ID
+     * @returns {boolean} true, wenn keine Verbrauchsquelle mehr abgefragt wird
+     */
+    ecoNichtsMehrZuHolen(deviceId) {
+        const k = this._kontextAbsagen || {};
+        return ecoRegel.nichtsMehrZuHolen(
+            this._ecoAbsagen && this._ecoAbsagen[deviceId],
+            k[`${deviceId}:${ECO_KONTEXT_LEAF.attr}`],
+            k[`${deviceId}:${KONTEXT_ERSATZ_LEAF.attr}`],
+            MieleLocal.ECO_ABSAGEN_MAX,
+        );
+    }
+
     async ecoEndspurtPruefen(deviceId, statusVal) {
         const dev = this.devices && this.devices[deviceId];
         if (!dev) {
+            return;
+        }
+        if (this.ecoNichtsMehrZuHolen(deviceId)) {
+            if (dev.ecoEndspurtTimer) {
+                this.clearInterval(dev.ecoEndspurtTimer);
+                dev.ecoEndspurtTimer = null;
+            }
             return;
         }
         const rest = await this.getStateAsync(`${deviceId}.state.remainingMinutes`);

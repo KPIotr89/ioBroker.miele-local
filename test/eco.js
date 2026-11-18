@@ -288,3 +288,26 @@ describe('Eco: Endstand der Antriebsenergie (F16) halten', () => {
         expect(z).to.match(/F26 -/);
     });
 });
+
+/**
+ * Forum 15.11.2026 (WWG760): Nach "no longer queried" schrieb der Adapter weiter
+ * "final phase ... reading every 60 s" und "final reading attempt 1 of 3", ohne zu fragen.
+ */
+describe('Eco: nichts mehr zu holen', () => {
+    it('erst wenn alle drei Quellen abgesagt haben', () => {
+        expect(eco.nichtsMehrZuHolen(3, 3, 3, 3)).to.equal(true);
+    });
+
+    it('nicht, solange der Gerätekontext noch antwortet', () => {
+        expect(eco.nichtsMehrZuHolen(3, 0, 3, 3)).to.equal(false);
+        expect(eco.nichtsMehrZuHolen(3, 3, 1, 3)).to.equal(false);
+    });
+
+    it('nicht, solange das Eco-Leaf noch gefragt wird', () => {
+        expect(eco.nichtsMehrZuHolen(2, 3, 3, 3)).to.equal(false);
+    });
+
+    it('fehlende Zähler gelten als null', () => {
+        expect(eco.nichtsMehrZuHolen(undefined, undefined, undefined, 3)).to.equal(false);
+    });
+});
