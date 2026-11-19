@@ -88,16 +88,18 @@ wird damit an den meisten Stellen entbehrlich.
 Die Gerätekarten im Device-Manager nutzen sie nicht: Seit 0.5.1 zeigt eine Karte den Rohwert mit
 einer Wertetabelle in der **Systemsprache** des ioBroker (alle elf Admin-Sprachen). Status,
 Programmart, Trockenstufe und Phase sind in jeder Sprache vollständig. Programmnamen stammen aus
-der Community-Übersetzung von Home Assistant; wo eine Sprache dort keine hat (Ukrainisch ganz,
-Polnisch fast ganz, Russisch und Niederländisch teilweise), zeigt die Karte den englischen Namen –
-geraten wird nicht. Ein unbekannter Rohwert erscheint als Zahl.
+der Community-Übersetzung von Home Assistant; für Polnisch kommen die Waschmaschinen- und
+Trocknerprogramme aus den polnischen Miele-Gebrauchsanweisungen (`lib/werte_eigen.js`, nur Namen,
+die dort wörtlich stehen). Wo keine der beiden Quellen einen Namen hat (Ukrainisch ganz, Polnisch
+für die übrigen Geräte und für Programme, die in den Anleitungen fehlen, Russisch und
+Niederländisch teilweise), zeigt die Karte den englischen Namen – geraten wird nicht. Ein unbekannter Rohwert erscheint als Zahl.
 
 **Text-Datenpunkte in einer weiteren Sprache (optional).** *Abfrage & Werte → Sprache der
 Text-Datenpunkte* schreibt `statusText`, `programText`, `programPhaseText`, `programTypeText` und
 `dryingStepText` - und die Wertelisten der Rohwerte - in einer der elf Admin-Sprachen statt auf
 Deutsch oder Englisch. Fehlt eine Übersetzung, steht der englische Text da. Programmnamen kommen
-aus Home Assistant; für Polnisch sind Waschmaschinen- und Trocknerprogramme in
-`lib/werte_eigen.js` übersetzt. Die Vorgabe lässt alles, wie es war.
+aus Home Assistant und für polnische Waschmaschinen und Trockner aus den polnischen
+Miele-Gebrauchsanweisungen, wie auf den Karten. Die Vorgabe lässt alles, wie es war.
 
 Ist „Datenpunkt-Namen auf Deutsch“ aus, bleiben Namen und Beschreibungen mit Absicht schlichter
 englischer Text: Ein mehrsprachiger Name brächte im deutschen Admin wieder den deutschen Namen
@@ -375,6 +377,7 @@ Reverse-Engineering-Arbeit der Projekte `MieleRESTServer` (akappner),
 - (SmarthomeElektroniker) `/State.ExtendedState` wird protokolliert (debug) und als Hex-Rohwert in `collection.extendedState` abgelegt, nur zur Diagnose.
 - (SmarthomeElektroniker) Namen nach den Messungen vom 13.11.2026 (Objekt-IDs unverändert): `eco.energy`/`eco.energyWh` „Heizenergie (Vorgabe bei 230 V)“, `detail.process.heatingEnergy`/`heatingTime` „(Vorgabe)“, Feld 16 `energyConsumed` „Antriebsenergie“ in Wh (Endstand bleibt nach dem Programm stehen), Feld 4 „Laufzeit“.
 - (SmarthomeElektroniker) Debug-Protokoll: je Gerät eine Zeile für 2/6195, 2/1585, 2/391 und ExtendedState, ohne vollständige Seriennummer.
+- (KPIotr89) Neue Option **Sprache der Text-Datenpunkte** (Abfrage & Werte): `statusText`, `programText`, `programPhaseText`, `programTypeText`, `dryingStepText` und die Wertelisten der Rohwerte in einer der elf Admin-Sprachen. Vorgabe unverändert (Deutsch oder Englisch, je nach „Datenpunkt-Namen auf Deutsch“); fehlende Übersetzungen fallen auf Englisch zurück. Polnische Programmnamen für Waschmaschinen und Trockner, wörtlich aus den polnischen Miele-Gebrauchsanweisungen, auch auf den Gerätekarten. Danke an @KPIotr89 für den Beitrag (PR #23)
 
 ### 0.5.2 (2026-11-12)
 - (SmarthomeElektroniker) Fehlerbehebung: Eine Karte konnte „nicht verbunden“ zeigen und trotzdem den Ein-Knopf (oder das Licht) anbieten. Nach Stopp oder Neustart des Adapters behielten die `control.can*`-Datenpunkte ihren letzten Wert, ebenso bei Geräten, die beim Start nicht gefunden wurden. Jetzt setzt der Adapter sie beim Beenden und für jedes beim Start nicht gefundene Gerät zurück; ein nicht erreichbares Gerät oder eines mit Status 255 („nicht verbunden“) bekommt gar keinen Knopf
