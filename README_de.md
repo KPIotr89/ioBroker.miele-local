@@ -370,7 +370,7 @@ Reverse-Engineering-Arbeit der Projekte `MieleRESTServer` (akappner),
 	Placeholder for the next version (at the beginning of the line):
 	### **WORK IN PROGRESS**
 -->
-### **WORK IN PROGRESS**
+### 0.6.0 (2026-11-19)
 - (SmarthomeElektroniker) Der DOP2-Parser liest Typ 33 (Liste von Strukturen, AStruct). Bisher scheiterte ein Leaf, das ihn enthält (z. B. `2/1585`, `2/17`, `2/131`), komplett mit „Unknown DOP2 field type 33“.
 - (SmarthomeElektroniker) Der Gerätekontext `2/1585` (ersatzweise `2/391`) wird unabhängig vom Waschmaschinen-Leaf `2/6195` abgefragt. Werte des geräteeigenen EcoFeedback (Felder 6.3–6.6, 6.29, 6.31) beachten den Einheitentyp (121/46 = Wh, 45 = kWh, 44 = l) und entstehen nur, wenn das Gerät sie führt; TwinDos/AutoDos-Behälter (6.7) erscheinen als JSON. Geräte ohne `2/6195` (Spülmaschine) bekommen Energie und Wasser je Programm aus der Differenz der Lebenszähler 6.5/6.6. Die Werte „letztes Programm“ ersetzen `eco.*` im laufenden Programm nicht mehr.
 - (SmarthomeElektroniker) Leaf-Suche: Antworten, die sich nicht dekodieren lassen, gelten als beantwortet (Status 200, Fehlertext und Rohbytes getrennt abgelegt) – die Suche wird damit immer fertig. Neu `collection.scanJsonAnonym` ohne Seriennummer, Modulnummer, MAC, IP und WLAN-Namen, zum Teilen.
