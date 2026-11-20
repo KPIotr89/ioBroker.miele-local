@@ -23,6 +23,7 @@ const sammler = require('./lib/sammler');
 const feldsuche = require('./lib/feldsuche');
 const kontrolle = require('./lib/kontrolle');
 const leafscan = require('./lib/leafscan');
+const { ScanPlaner } = require('./lib/scanplaner');
 const leafverlauf = require('./lib/leafverlauf');
 const ids = require('./lib/ids');
 const felder = require('./lib/felder');
@@ -31,29 +32,12 @@ const datenpunkte = require('./lib/datenpunkte');
 const { MieleZeitdienst } = require('./lib/zeitdienst');
 const uhrzeit = require('./lib/uhrzeit');
 
-/**
- * Verschnaufpause zwischen zwei Scan-Durchgaengen.
- *
- * Eine Minute. Ein Durchgang sind vierzig Anfragen am Stueck; danach gehoert das Modul wieder
- * sich selbst, bevor der naechste Schwung kommt.
- */
-const PAUSE_ZWISCHEN_DURCHGAENGEN_MS = 60000;
-/**
- * Nach einem Abbruch wegen Verbindungsstoerungen - siehe leafScanDauerlauf.
- *
- * EINE Minute - so lange braucht das Modul, um wieder ansprechbar zu sein, und keine Sekunde
- * laenger. Zwischenzeitlich standen hier zwanzig Minuten; das war zweimal falsch gedacht:
- * Erstens ist die eigentliche Stellschraube gegen Ueberlastung die Pause ZWISCHEN den
- * Anfragen (leafscan.PAUSE_MS, seit 07.09.2026 fuenf Sekunden), zweitens wartet ein Scan,
- * der bei jedem Aussetzer minutenlang blockiert, am Ende laenger als er scannt - und wird
- * ueber 882 Adressen nie fertig. Ein Modul, das wieder kann, soll auch wieder gefragt werden.
- */
-const PAUSE_NACH_UEBERLASTUNG_MS = 60000;
 const { MielePushListener } = require('./lib/push');
 const enroll = require('./lib/enroll');
 const loxone = require('./lib/loxone');
 const mqttBruecke = require('./lib/mqttbruecke');
 const dop2 = require('./lib/dop2');
+const geraetekontext = require('./lib/geraetekontext');
 const stats = require('./lib/stats');
 const { mussNachziehen } = require('./lib/objektabgleich');
 const { MieleGeraeteManager, angebot, angebotLeeren, fortschritt } = require('./lib/geraetemanager');
@@ -61,8 +45,16 @@ const { MieleGeraeteManager, angebot, angebotLeeren, fortschritt } = require('./
 /*
  * EcoFeedback: DOP2-Leaf 2/6195 (bislang nur Waschmaschinen liefern ihn).
  *
- * Die Feldindizes sind 1-basiert und modellabhängig; für die WCR860 wurden sie gegen den
- * Cloud-Adapter geprüft.
+ * Die Feldindizes sind 1-basiert und modellabhängig. Stand 13.11.2026 (WCR860, 31 Läufe gegen
+ * Messsteckdose) - die Tabelle darunter ist die GESCHICHTE dieser Zuordnung, nicht der Befund:
+ *
+ *   #25  Heizenergie-VORGABE der Hauptwäsche in Wh = #26 x 2020 W bei 230 V (keine Messung)
+ *   #26  geplante Heizzeit in s
+ *   #16  Antriebsenergie in Wh, zählt laufend, ohne Heizstab
+ *   #21  Wasser, 5 ml je Impuls (÷ 200 = l)
+ *   #4   Laufzeit in min (zählt aufwärts)
+ *
+ * Bis 0.3.x stand hier:
  *
  *   #25  Energie in Wh              2077 ≈ Cloud 1,9 kWh
  *   #26  Wasser in Hundertstellitern 3703 ≈ Cloud 34 l
@@ -143,10 +135,14 @@ const ECO_WATER_DIV = 200; // Teilungsfaktor Wasserfeld: Rohwert / Faktor = Lite
  * der Wert des Geraets ist die Auskunft des Herstellers.
  */
 const ECO_KONTEXT_LEAF = { unit: 2, attr: 1585 };
-/** Feld 6 von 2/1585 traegt die Geraeteattribute, darin Feld 4 das Wasser des letzten Programms. */
-const ECO_KONTEXT_WASSER = '6.4';
-/** ... und Feld 3 die Energie des letzten Programms. */
-const ECO_KONTEXT_ENERGIE = '6.3';
+/*
+ * Feld 6 von 2/1585 traegt die Geraeteattribute, darin 6.3/6.4 Energie und Wasser des letzten
+ * Programms - ausgewertet mit Einheitentyp in lib/geraetekontext.js.
+ *
+ * 2/391 traegt laut Namenstabelle (lib/leafnamen.js) ebenfalls einen DeviceContext und wird
+ * gefragt, wenn 2/1585 nichts liefert.
+ */
+const KONTEXT_ERSATZ_LEAF = { unit: 2, attr: 391 };
 
 // Sekundengenaue Zeiten aus DOP2-Leaf 2/256 (verifiziert: #7 Restzeit s, #8 Laufzeit s).
 const SEC_LEAF = { unit: 2, attr: 256 };
@@ -182,7 +178,7 @@ const FEIN_TAKT_MS = 20000;
 /** Darueber hinaus lohnt es nicht - die normale Runde laeuft ohnehin alle drei Minuten. */
 const FEIN_TAKT_MAX_MS = 120000;
 /**
- * Die Adresse fuer die Kontrollfrage vor jedem Scan-Durchgang - siehe gespraechsbereit.
+ * Die Adresse fuer die Kontrollfrage des Leaf-Scans - siehe kontrollfrage.
  *
  * 2/1583 liegt in der Umgebung der Benutzeranfrage - dem einzigen Bereich, in dem BEIDE
  * bekannten Geraete ueberhaupt differenziert antworten: die Waschmaschine mit einem Treffer,
@@ -205,9 +201,8 @@ const KONTROLL_ADRESSE = [2, 1583];
  * Grund ein Fehlgriff. Ein Geraet, das die Adresse nicht kennt, wuerde also nie gescannt.
  *
  * Deshalb: Hat ein Geraet die Kontrollfrage noch NIE beantwortet und ist es eingeschaltet,
- * wird nach zehn Anlaeufen - rund zehn Minuten - trotzdem ein Durchgang gewagt. Der Durchgang
- * schuetzt sich selbst: Haeufen sich Abbrueche, endet er von allein und der Dauerlauf legt
- * eine lange Pause ein. Sobald die Kontrollfrage einmal geantwortet hat, gilt sie fuer dieses
+ * wird nach zehn Anlaeufen trotzdem gescannt. Der Scan schuetzt sich selbst: Jede Stoerung
+ * schickt das Geraet in eine wachsende Pause (leafscan.rueckzugMs). Sobald die Kontrollfrage einmal geantwortet hat, gilt sie fuer dieses
  * Geraet und der Rueckfall entfaellt.
  */
 const KONTROLLE_TAUB_MAX = 10;
@@ -289,7 +284,10 @@ class MieleLocal extends utils.Adapter {
          * das kein EcoFeedback mehr liefert, durchlaeuft ensureEcoObjects nie - dort waere
          * die Korrektur sonst haengen geblieben.
          */
-        const soll = objdef.ecoCommon(german);
+        // Fuehrte das Geraet zuletzt sein eigenes EcoFeedback, gelten dessen Namen - siehe ecoCommon.
+        const quelle = await this.getStateAsync(`${deviceId}.eco.source`).catch(() => null);
+        const amtlich = !!(quelle && String(quelle.val).startsWith('Appliance (lifetime'));
+        const soll = objdef.ecoCommon(german, amtlich);
         for (const sub of Object.keys(soll)) {
             const id = `${deviceId}.${sub}`;
             try {
@@ -963,8 +961,28 @@ class MieleLocal extends utils.Adapter {
                     val: f.type === 'number' ? Number(val) : String(val),
                     ack: true,
                 });
+                // Fuer kurze Protokollzeilen ohne Seriennummer - siehe kennung().
+                if (f.sub === 'techType' && this.devices && this.devices[deviceId] && val) {
+                    this.devices[deviceId].techType = String(val);
+                }
             }
         }
+    }
+
+    /**
+     * Ein Geraet im Protokoll benennen, ohne die Seriennummer auszuschreiben.
+     *
+     * Debug-Zeilen landen in Forenbeitraegen und Fehlerberichten. Die Seriennummer identifiziert
+     * ein einzelnes Geraet; fuer die Zuordnung im eigenen Protokoll reichen Modell und die
+     * letzten vier Stellen ("WCR860 …3556").
+     *
+     * @param {string} deviceId Geraete-ID (Seriennummer)
+     * @returns {string} kurze Kennung
+     */
+    kennung(deviceId) {
+        const dev = this.devices && this.devices[deviceId];
+        const modell = (dev && dev.techType) || 'appliance';
+        return `${modell} …${String(deviceId).slice(-4)}`;
     }
 
     /** /State-Objekt in ioBroker-States übernehmen. */
@@ -1172,7 +1190,7 @@ class MieleLocal extends utils.Adapter {
             if (this.config.ecoFeedback) {
                 await this.ecoEndspurtPruefen(deviceId, statusVal);
             }
-            if (dev.ecoLaeuft && !laeuftJetzt) {
+            if (dev.ecoLaeuft && !laeuftJetzt && !this.ecoNichtsMehrZuHolen(deviceId)) {
                 dev.ecoNachlaufBis = Date.now() + ecoRegel.NACHLAUF_MS;
                 dev.ecoStabil = 0;
                 this.log.debug(
@@ -1207,6 +1225,7 @@ class MieleLocal extends utils.Adapter {
         }
         const laeuft = statusVal === 5 || statusVal === 6;
         let offen = this._cycles[deviceId];
+        const geraet = this.devices && this.devices[deviceId];
 
         // Nach einem Neustart ist der offene Zyklus weg, das Programm laeuft aber weiter. Ohne
         // Wiederaufnahme begann die Zaehlung von vorn: am 22.08.2026 stand im Verlauf
@@ -1247,10 +1266,15 @@ class MieleLocal extends utils.Adapter {
                  * dieser Zweig faengt ihn mit ab, weil das Geraet nach einer Minute bereits
                  * elapsedMinutes = 1 meldet und der Lauf damit wie eine Fortsetzung aussieht.
                  */
-                if (zaehlerStart == null && Date.now() - start < 5 * 60000) {
-                    zaehlerStart = await this.zaehlerStand(deviceId);
+                let kontextStart = null;
+                if (Date.now() - start < 5 * 60000) {
+                    if (zaehlerStart == null) {
+                        zaehlerStart = await this.zaehlerStand(deviceId);
+                    }
+                    // Ebenso die Lebenszaehler des Geraets - siehe kontextVerbrauchBuchen.
+                    kontextStart = geraet ? await this.kontextZaehlerStand(deviceId, geraet) : null;
                 }
-                this._cycles[deviceId] = { start, zaehlerStart };
+                this._cycles[deviceId] = { start, zaehlerStart, kontextStart };
                 offen = this._cycles[deviceId];
                 await this.ensureHistoryObjects(deviceId);
                 await this.setStateAsync(ids.h(deviceId, 'runningSince'), { val: start, ack: true });
@@ -1272,6 +1296,8 @@ class MieleLocal extends utils.Adapter {
                     ecoWasserStart: await stand(`${deviceId}.eco.water`),
                     // Der Stand der Messsteckdose beim Start - siehe gemessenerVerbrauch.
                     zaehlerStart: await this.zaehlerStand(deviceId),
+                    // Die Lebenszaehler des Geraets (2/1585) - siehe kontextVerbrauchBuchen.
+                    kontextStart: geraet ? await this.kontextZaehlerStand(deviceId, geraet) : null,
                 };
                 /*
                  * Den Stand aller Leafs beim Start holen - nebenher.
@@ -1449,6 +1475,10 @@ class MieleLocal extends utils.Adapter {
             dev.ecoWasserVorletzter = null;
         }
 
+        // Verbrauch aus den Lebenszaehlern des Geraets (2/1585) - vor dem Buchen.
+        await this.kontextVerbrauchBuchen(deviceId, dev, offen, eintrag).catch(e =>
+            this.log.debug(`${this.kennung(deviceId)}: counter consumption not booked - ${e.message}`),
+        );
         await this.appendCycle(deviceId, eintrag);
         await this.sammlungAufnehmen(deviceId, eintrag);
 
@@ -2526,9 +2556,37 @@ class MieleLocal extends utils.Adapter {
         return Math.min(begrenzt * einheitMs, TIMER_MAX_MS);
     }
 
+    /**
+     * Gibt es bei diesem Geraet nichts mehr zu holen?
+     *
+     * Wahr, wenn das Eco-Leaf (2/6195) UND beide Kontext-Leafs (2/1585, 2/391) dreimal mit
+     * "kenne ich nicht" abgesagt haben. pollEco fragt dann ohnehin nichts mehr ab - Endspurt-
+     * Takt und Schlussablesung wuerden nur Logzeilen ohne jede Anfrage erzeugen (Forum 15.11.,
+     * WWG760: "final phase ... reading every 60 s" nach "no longer queried").
+     *
+     * @param deviceId Geraete-ID
+     * @returns {boolean} true, wenn keine Verbrauchsquelle mehr abgefragt wird
+     */
+    ecoNichtsMehrZuHolen(deviceId) {
+        const k = this._kontextAbsagen || {};
+        return ecoRegel.nichtsMehrZuHolen(
+            this._ecoAbsagen && this._ecoAbsagen[deviceId],
+            k[`${deviceId}:${ECO_KONTEXT_LEAF.attr}`],
+            k[`${deviceId}:${KONTEXT_ERSATZ_LEAF.attr}`],
+            MieleLocal.ECO_ABSAGEN_MAX,
+        );
+    }
+
     async ecoEndspurtPruefen(deviceId, statusVal) {
         const dev = this.devices && this.devices[deviceId];
         if (!dev) {
+            return;
+        }
+        if (this.ecoNichtsMehrZuHolen(deviceId)) {
+            if (dev.ecoEndspurtTimer) {
+                this.clearInterval(dev.ecoEndspurtTimer);
+                dev.ecoEndspurtTimer = null;
+            }
             return;
         }
         const rest = await this.getStateAsync(`${deviceId}.state.remainingMinutes`);
@@ -2573,67 +2631,164 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
-     * Das EcoFeedback des Geraets holen - falls es eines fuehrt.
+     * Den Geraetekontext holen - 2/1585 und ersatzweise 2/391 -, UNABHAENGIG vom Eco-Leaf.
      *
-     * DREI ABSAGEN, DANN RUHE. Dieselbe Regel wie beim Eco-Leaf: Ein 404 heisst "dieses Modell
-     * kennt den Leaf nicht", und das aendert sich nicht mehr. Der Zaehler lebt nur im
-     * Arbeitsspeicher - nach einem Neustart wird erneut geprueft, falls inzwischen eine neue
-     * Firmware auf dem Modul liegt.
+     * BIS 0.5.2 HING DAS AM ECO-LEAF. ecoKontextLesen lief nur, wenn 2/6195 vorher mit 200
+     * geantwortet hatte. Gerade die Geraete, fuer die 2/1585 die einzige Verbrauchsquelle waere -
+     * Spuelmaschinen und Trockner, die 2/6195 nicht kennen -, wurden damit nie gefragt.
      *
-     * Die Felder selbst landen als Datenpunkte unter "detail.ecoFeedback" - dafuer ist hier
-     * nichts zu tun, das erledigt geraeteWerteSchreiben aus demselben Abruf.
+     * DREI ABSAGEN, DANN RUHE - je Adresse. Ein 404/501 heisst "dieses Modell kennt den Leaf
+     * nicht", und das aendert sich nicht mehr. Der Zaehler lebt nur im Arbeitsspeicher; nach einem
+     * Neustart wird erneut geprueft, falls inzwischen eine neue Firmware auf dem Modul liegt.
+     *
+     * HOECHSTENS EINMAL JE MINUTE und nur, wenn auch das Eco-Leaf gefragt wuerde (Geraet wach
+     * oder erste Erkundung nach dem Start). Das Modul bedient nur eine Verbindung.
+     *
+     * 2/391 traegt laut Namenstabelle ebenfalls einen DeviceContext. Seine Werte werden nur
+     * geschrieben, wenn 2/1585 nichts liefert - sonst stuenden zwei Quellen in denselben
+     * Datenpunkten und wechselten sich ab.
      *
      * @param deviceId Geraete-ID
      * @param dev Laufzeitzustand des Geraets
-     * @returns {{energieWh: number|null, wasserL: number|null}|null} null = kein EcoFeedback
+     * @param {boolean} [erzwingen] ohne Minutensperre (Programmstart/-ende)
      */
-    async ecoKontextLesen(deviceId, dev) {
+    async kontextAbfragen(deviceId, dev, erzwingen = false) {
+        if (!this._kontextZuletzt) {
+            this._kontextZuletzt = {};
+        }
+        if (!erzwingen && Date.now() - (this._kontextZuletzt[deviceId] || 0) < 60000) {
+            return;
+        }
+        this._kontextZuletzt[deviceId] = Date.now();
+        const ergebnis = await this.kontextLeafLesen(deviceId, dev, ECO_KONTEXT_LEAF, true);
+        if (!ergebnis.geliefert) {
+            await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, true);
+        } else if (!dev.kontextErsatzErkundet) {
+            // Einmal je Adapterlauf zur Erkundung mitlesen, nichts schreiben (siehe oben).
+            dev.kontextErsatzErkundet = true;
+            await this.kontextLeafLesen(deviceId, dev, KONTEXT_ERSATZ_LEAF, false);
+        }
+    }
+
+    /**
+     * Ein Kontext-Leaf lesen, protokollieren und - wenn gewuenscht - als Datenpunkte schreiben.
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @param {{unit: number, attr: number}} adresse 2/1585 oder 2/391
+     * @param {boolean} schreiben Datenpunkte schreiben
+     * @returns {Promise<{geliefert: boolean}>} ob das Leaf geantwortet hat
+     */
+    async kontextLeafLesen(deviceId, dev, adresse, schreiben) {
+        const leaf = `${adresse.unit}/${adresse.attr}`;
+        const schluessel = `${deviceId}:${adresse.attr}`;
         if (!this._kontextAbsagen) {
             this._kontextAbsagen = {};
         }
-        if ((this._kontextAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
-            return null;
+        const nichts = { geliefert: false };
+        if ((this._kontextAbsagen[schluessel] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
+            return nichts;
         }
+        const wer = this.kennung(deviceId);
         let fields;
         try {
-            const res = await dev.api.readDop2(dev.route, ECO_KONTEXT_LEAF.unit, ECO_KONTEXT_LEAF.attr);
+            const res = await dev.api.readDop2(dev.route, adresse.unit, adresse.attr);
             if (res.status !== 200 || !res.headers['x-signature']) {
+                let zusatz = '';
                 if (MieleLocal.kenntLeafNicht(res.status)) {
-                    this._kontextAbsagen[deviceId] = (this._kontextAbsagen[deviceId] || 0) + 1;
-                    if (this._kontextAbsagen[deviceId] >= MieleLocal.ECO_ABSAGEN_MAX) {
-                        this.log.debug(
-                            `Eco ${deviceId}: this model has no own ` +
-                                'EcoFeedback (2/1585), the flow meter remains the source.',
-                        );
+                    const n = (this._kontextAbsagen[schluessel] = (this._kontextAbsagen[schluessel] || 0) + 1);
+                    zusatz = ` (${n}/${MieleLocal.ECO_ABSAGEN_MAX})`;
+                    if (n >= MieleLocal.ECO_ABSAGEN_MAX) {
+                        zusatz += ' - this model does not know the leaf, no longer queried';
                     }
                 }
-                return null;
+                this.log.debug(`Context ${wer}: ${leaf} HTTP ${res.status}${zusatz}`);
+                return nichts;
             }
             ({ fields } = dop2.parseLeaf(this.mc.decryptResponse(res.headers['x-signature'], res.body)));
         } catch (e) {
-            this.log.debug(`Eco ${deviceId}: 2/1585 - ${e.message}`);
-            return null;
+            this.log.debug(`Context ${wer}: ${leaf} - ${e.message}`);
+            return nichts;
         }
-        this._kontextAbsagen[deviceId] = 0;
-        const leaf = `${ECO_KONTEXT_LEAF.unit}/${ECO_KONTEXT_LEAF.attr}`;
-        await this.geraeteWerteSchreiben(deviceId, leaf, fields);
+        this._kontextAbsagen[schluessel] = 0;
+        const a = geraetekontext.auswerten(fields);
+        this.log.debug(
+            `Context ${wer}: ${leaf} HTTP 200, ${Object.keys(fields).length} fields - ` +
+                `${geraetekontext.protokollZeile(a)}${schreiben ? '' : ' (not written, 2/1585 answers)'}`,
+        );
+        if (schreiben) {
+            await this.geraeteWerteSchreiben(deviceId, leaf, fields);
+            // Lebenszaehler fuer den Verbrauch je Programm - siehe kontextVerbrauchBuchen.
+            if (a.energieGesamtWh != null || a.wasserGesamtL != null) {
+                dev.kontextZaehler = { energieWh: a.energieGesamtWh, wasserL: a.wasserGesamtL, zeit: Date.now() };
+            }
+        }
+        return { geliefert: true };
+    }
 
-        let werte;
-        try {
-            werte = datenpunkte.istwerte(leaf, fields);
-        } catch {
-            return null;
+    /**
+     * Den Stand der Lebenszaehler aus 2/1585 (Feld 6.5/6.6) - frisch gelesen, wenn moeglich.
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @returns {Promise<{energieWh: number|null, wasserL: number|null, zeit: number}|null>} Stand oder null
+     */
+    async kontextZaehlerStand(deviceId, dev) {
+        await this.kontextAbfragen(deviceId, dev, true).catch(() => {});
+        return dev.kontextZaehler ? Object.assign({}, dev.kontextZaehler) : null;
+    }
+
+    /**
+     * Verbrauch eines abgeschlossenen Programms aus den Lebenszaehlern des Geraets buchen.
+     *
+     * WARUM. Die Spuelmaschine G5840 beantwortet 2/6195 nicht, fuehrt aber unter 2/1585 Feld 6.5/6.6
+     * Lebenszaehler fuer Energie (Einheitentyp 121 = Wh) und Wasser (44 = l) - am 13.11.2026 zum
+     * ersten Mal gelesen. Die Differenz zwischen Programmstart und -ende ist der Verbrauch dieses
+     * Programms, gemessen vom Geraet selbst. Bei der Waschmaschine kommt dieselbe Differenz als
+     * Vergleichswert in den Datensatz, ersetzt aber F21/F25 nicht.
+     *
+     * @param deviceId Geraete-ID
+     * @param dev Laufzeitzustand des Geraets
+     * @param {object} offen der zu Ende gehende Zyklus (kontextStart)
+     * @param {object} eintrag der Zyklus-Eintrag, wird ergaenzt
+     */
+    async kontextVerbrauchBuchen(deviceId, dev, offen, eintrag) {
+        if (!dev || !offen || !offen.kontextStart) {
+            return;
         }
-        const hole = pfad => {
-            const w = werte.find(x => x.pfad === pfad);
-            return w && typeof w.wert === 'number' ? w.wert : null;
-        };
-        const energieWh = hole(ECO_KONTEXT_ENERGIE);
-        const wasserL = hole(ECO_KONTEXT_WASSER);
-        if (energieWh == null && wasserL == null) {
-            return null;
+        const ende = await this.kontextZaehlerStand(deviceId, dev);
+        const v = geraetekontext.verbrauch(offen.kontextStart, ende);
+        const wer = this.kennung(deviceId);
+        if (!v) {
+            this.log.debug(`Context ${wer}: no consumption from the lifetime counters (start or end missing)`);
+            return;
         }
-        return { energieWh, wasserL };
+        eintrag.geraetZaehler = v;
+        this.log.info(
+            `${wer}: consumption from the appliance counters (2/1585) - ` +
+                `${v.energieWh == null ? '-' : `${v.energieWh} Wh`}, ${v.wasserL == null ? '-' : `${v.wasserL} l`}`,
+        );
+        // Nur dort eintragen, wo der Adapter sonst nichts hat (Geraete ohne 2/6195).
+        const energie = eintrag.energyKwh == null && v.energieWh != null;
+        const wasser = eintrag.waterL == null && v.wasserL != null;
+        if (!energie && !wasser) {
+            return;
+        }
+        dev.ecoAmtlichEnergie = energie;
+        await this.ensureEcoObjects(deviceId);
+        await this.setStateChangedAsync(`${deviceId}.eco.source`, {
+            val: 'Appliance (lifetime counters 2/1585)',
+            ack: true,
+        });
+        if (energie) {
+            eintrag.energyKwh = Math.round(v.energieWh) / 1000;
+            await this.setStateAsync(`${deviceId}.eco.energyWh`, { val: v.energieWh, ack: true });
+            await this.setStateAsync(`${deviceId}.eco.energy`, { val: eintrag.energyKwh, ack: true });
+        }
+        if (wasser) {
+            eintrag.waterL = v.wasserL;
+            await this.setStateAsync(`${deviceId}.eco.water`, { val: v.wasserL, ack: true });
+        }
     }
 
     async pollEco() {
@@ -2641,16 +2796,23 @@ class MieleLocal extends utils.Adapter {
             this._ecoAbsagen = {};
         }
         for (const [deviceId, dev] of Object.entries(this.devices)) {
-            // Geräte ohne Eco-Leaf nicht endlos fragen. Der Zähler lebt nur im Arbeitsspeicher:
-            // nach einem Neustart wird erneut geprüft, falls ein Gerät inzwischen mehr kann.
-            if ((this._ecoAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
-                continue;
-            }
             // Schlafende Geraete nicht behelligen - siehe ecoAbfragenSinnvoll.
             if (!this.ecoAbfragenSinnvoll(deviceId, dev)) {
                 continue;
             }
             this._ecoErkundet[deviceId] = true;
+            const wer = this.kennung(deviceId);
+            /*
+             * Zuerst der Geraetekontext (2/1585, ersatzweise 2/391) - UNABHAENGIG vom Eco-Leaf.
+             * Bis 0.5.2 lief er nur nach einer erfolgreichen Antwort auf 2/6195 und erreichte
+             * damit gerade die Geraete nie, die 2/6195 nicht kennen. Siehe kontextAbfragen.
+             */
+            await this.kontextAbfragen(deviceId, dev).catch(e => this.log.debug(`Context ${wer}: ${e.message}`));
+            // Geräte ohne Eco-Leaf nicht endlos fragen. Der Zähler lebt nur im Arbeitsspeicher:
+            // nach einem Neustart wird erneut geprüft, falls ein Gerät inzwischen mehr kann.
+            if ((this._ecoAbsagen[deviceId] || 0) >= MieleLocal.ECO_ABSAGEN_MAX) {
+                continue;
+            }
             // Ein 500er sagt nichts über das Modell aus - die Spülmaschine antwortet so im
             // Aus-Zustand. Solche Geräte werden weiter gefragt, nur eben seltener.
             if (this._ecoSelten && this._ecoSelten[deviceId] && Date.now() < this._ecoSelten[deviceId]) {
@@ -2679,21 +2841,22 @@ class MieleLocal extends utils.Adapter {
                         }
                         this._ecoSelten[deviceId] = Date.now() + 5 * 60 * 1000;
                     }
-                    this.log.debug(`Eco ${deviceId}: no eco leaf (HTTP ${res.status})${schluss}`);
+                    this.log.debug(`Eco ${wer}: 2/6195 HTTP ${res.status} - no eco leaf${schluss}`);
                     continue;
                 }
                 plain = this.mc.decryptResponse(res.headers['x-signature'], res.body);
             } catch (e) {
-                this.log.debug(`Eco ${deviceId}: ${e.message}`);
+                this.log.debug(`Eco ${wer}: 2/6195 - ${e.message}`);
                 continue;
             }
             let fields;
             try {
                 ({ fields } = dop2.parseLeaf(plain));
             } catch (e) {
-                this.log.debug(`Eco ${deviceId}: parse error ${e.message}`);
+                this.log.debug(`Eco ${wer}: 2/6195 parse error ${e.message}`);
                 continue;
             }
+            this.log.debug(`Eco ${wer}: 2/6195 HTTP 200 - ${ecoRegel.prozessZeile(fields)}`);
             // Auch die uebrigen Felder dieses Leaf sind Messwerte - sie kosten keinen weiteren
             // Abruf, weil der Leaf ohnehin gerade gelesen wurde.
             await this.geraeteWerteSchreiben(deviceId, `${ECO_LEAF.unit}/${ECO_LEAF.attr}`, fields);
@@ -2712,34 +2875,16 @@ class MieleLocal extends utils.Adapter {
                 Number(this.config.ecoWaterDiv) > 0 ? Number(this.config.ecoWaterDiv) : ECO_WATER_DIV,
             );
             /*
-             * Was das Geraet selbst als EcoFeedback fuehrt, hat Vorrang.
+             * Das EcoFeedback des Geraets (2/1585 Feld 6.3/6.4) ersetzt diese Werte NICHT mehr.
              *
-             * DER FALLBACK IST DER DURCHFLUSSZAEHLER, nicht umgekehrt. Sagt das Geraet, wie viel
-             * Wasser das letzte Programm gebraucht hat, gilt seine Zahl; schweigt es, bleibt es
-             * bei Feld 21 des Eco-Leaf geteilt durch 200 - der Impulszaehlung, die an 24 Laeufen
-             * gegen den Hauswasserzaehler steht (Median 200,10 Impulse je Liter, Streuung 1,4 %).
-             *
-             * HOECHSTENS EINMAL JE MINUTE. Das Modul bedient nur eine Verbindung; wer den
-             * Eco-Takt auf zehn Sekunden stellt, soll damit nicht auch diesen Abruf versechsfachen.
+             * Bis 0.5.2 stand hier "das Geraet hat Vorrang" - entworfen, ohne dass je ein Geraet
+             * 2/1585 beantwortet hatte. Seit dem 13.11.2026 antwortet die WCR860, und es zeigt
+             * sich: 6.3/6.4 sind die Werte des LETZTEN, abgeschlossenen Programms. Mitten im Lauf
+             * haette eco.water damit 27 l (Vorlauf) statt der laufenden 74 l gezeigt, und die
+             * Endwert-Regeln (ecoRegel.ablesungBewerten) waeren ausgehebelt. Die Geraetewerte
+             * stehen unter detail.ecoFeedback; den Verbrauch je Programm aus den Lebenszaehlern
+             * rechnet trackCycle (kontextVerbrauchBuchen).
              */
-            if (!this._kontextZuletzt) {
-                this._kontextZuletzt = {};
-            }
-            if (Date.now() - (this._kontextZuletzt[deviceId] || 0) >= 60000) {
-                this._kontextZuletzt[deviceId] = Date.now();
-                const amtlich = await this.ecoKontextLesen(deviceId, dev);
-                if (amtlich) {
-                    if (amtlich.wasserL != null) {
-                        eco.waterL = amtlich.wasserL;
-                        dev.ecoAmtlich = true;
-                    }
-                    if (amtlich.energieWh != null) {
-                        eco.energyWh = amtlich.energieWh;
-                        eco.energyKwh = Math.round(amtlich.energieWh) / 1000;
-                        dev.ecoAmtlich = true;
-                    }
-                }
-            }
             if (eco.energyWh == null && eco.waterL == null) {
                 continue;
             }
@@ -2753,7 +2898,7 @@ class MieleLocal extends utils.Adapter {
              * Einstellung "Gerät"/"Durchflusszähler" unter der ID eco.quelle.
              */
             await this.setStateChangedAsync(`${deviceId}.eco.source`, {
-                val: dev.ecoAmtlich ? 'Appliance (EcoFeedback)' : 'Adapter (flow meter)',
+                val: 'Adapter (flow meter)',
                 ack: true,
             });
 
@@ -2829,8 +2974,22 @@ class MieleLocal extends utils.Adapter {
                             alleFelder[idx] = Number(v);
                         }
                     }
+                    // Den Endstand der Antriebsenergie (F16) halten - siehe ecoRegel.endstandHalten.
+                    let altFelder = null;
+                    try {
+                        altFelder = hatteWerte ? JSON.parse(vorherige.val) : null;
+                    } catch {
+                        altFelder = null;
+                    }
+                    const { werte, gehalten } = ecoRegel.endstandHalten(altFelder, alleFelder, laeuft);
+                    if (gehalten.length) {
+                        this.log.debug(
+                            `Eco ${wer}: field ${gehalten.join(', ')} reset to 0 after the programme, ` +
+                                'final value kept in fieldsJson',
+                        );
+                    }
                     await this.setStateAsync(`${deviceId}.eco.fieldsJson`, {
-                        val: JSON.stringify(alleFelder),
+                        val: JSON.stringify(werte),
                         ack: true,
                     });
                 }
@@ -3036,7 +3195,7 @@ class MieleLocal extends utils.Adapter {
              *
              * ROLLE "switch", NICHT "button". Ein Knopf loest aus und faellt zurueck; dieser
              * Schalter BLEIBT stehen, solange die Suche laeuft, und der Dauerlauf fragt ihn bei
-             * jedem Durchgang ab (leafScanDauerlauf). Umlegen heisst also "suchen, bis fertig",
+             * jedem Schritt ab (scanSchritt). Umlegen heisst also "suchen, bis fertig",
              * nicht "einen Durchgang ausloesen".
              *
              * Die Objektpruefung des Aufnahmeantrags hat das am 19.09.2026 aufgedeckt: Ein
@@ -3081,6 +3240,26 @@ class MieleLocal extends utils.Adapter {
                 'Found leaves with fields (JSON)',
                 'string',
                 'json',
+                '',
+                false,
+            ],
+            // Dasselbe ohne Seriennummer, MAC, IP und WLAN-Name - zum Teilen.
+            [
+                ids.SAMMLUNG.scanJsonAnonym,
+                'Gefundene Leafs ohne Kennungen (JSON, zum Teilen)',
+                'Found leaves without identifiers (JSON, for sharing)',
+                'string',
+                'json',
+                '',
+                false,
+            ],
+            // Rohwert von /State.ExtendedState - nur Diagnose, siehe extendedStateDiagnose.
+            [
+                ids.SAMMLUNG.extendedState,
+                'ExtendedState aus /State (Hex, Diagnose)',
+                'ExtendedState from /State (hex, diagnostics)',
+                'string',
+                'text',
                 '',
                 false,
             ],
@@ -3177,7 +3356,11 @@ class MieleLocal extends utils.Adapter {
         if (!this._ecoCreated) {
             this._ecoCreated = {};
         }
-        if (this._ecoCreated[deviceId]) {
+        // Die Namen haengen an der Quelle der Energie (siehe ecoCommon): Wechselt sie, neu anlegen.
+        const dev = this.devices && this.devices[deviceId];
+        const amtlich = !!(dev && dev.ecoAmtlichEnergie);
+        const variante = amtlich ? 'amtlich' : 'vorgabe';
+        if (this._ecoCreated[deviceId] === variante) {
             return;
         }
         const german = this.config.germanNames !== false;
@@ -3190,7 +3373,7 @@ class MieleLocal extends utils.Adapter {
         // Zwei getrennte Tabellen fuer dieselben Punkte waren bis 0.3.10 der Grund dafuer,
         // dass die Umbenennung der Energiefelder wirkungslos blieb: Diese Stelle setzte
         // beim naechsten laufenden Programm die alten Namen zurueck.
-        const defs = objdef.ecoStates(german, this.config.ecoRawFields);
+        const defs = objdef.ecoStates(german, this.config.ecoRawFields, amtlich);
         for (const d of defs) {
             await this.extendObjectAsync(`${deviceId}.eco.${d.sub}`, {
                 type: 'state',
@@ -3198,7 +3381,7 @@ class MieleLocal extends utils.Adapter {
                 native: {},
             });
         }
-        this._ecoCreated[deviceId] = true;
+        this._ecoCreated[deviceId] = variante;
     }
 
     /** Sekundengenaue Rest-/Laufzeit aus DOP2 2/256 (#7 Rest s, #8 Lauf s) – nur wo verfügbar. */
@@ -3423,6 +3606,9 @@ class MieleLocal extends utils.Adapter {
                     const state = await dev.api.getState(dev.route);
                     if (state) {
                         await this.applyState(deviceId, state);
+                        await this.extendedStateDiagnose(deviceId, state).catch(e =>
+                            this.log.debug(`State ${this.kennung(deviceId)}: ExtendedState - ${e.message}`),
+                        );
                         await this.setStateAsync(`${deviceId}.info.connected`, { val: true, ack: true });
                         ok = true;
                     }
@@ -3473,65 +3659,88 @@ class MieleLocal extends utils.Adapter {
     }
 
     /**
-     * Einen Durchgang des Leaf-Scans fahren.
+     * /State.ExtendedState mitlesen - NUR als Diagnose, ohne Deutung.
      *
-     * WARUM IN DURCHGAENGEN. Der volle Suchraum sind rund 700 Adressen; bei 700 ms Pause
-     * waeren das acht Minuten am Stueck, in denen das Geraet nichts anderes tut. Ein
-     * Durchgang nimmt sich deshalb nur ein Stueck vor und merkt sich, wo er stand - beim
-     * naechsten Anstossen geht es dort weiter. Ein Abbruch mittendrin kostet nichts.
+     * WAS MAN DARUEBER WEISS. Das Feld ist ein Hex-Text, dessen Aufbau je Geraeteart verschieden
+     * ist. Fuer Kochfelder ist er belegt (ha-miele-at-lan, extended_state.py: Kochzonen,
+     * Leistungsstufen). Fuer Waschmaschinen gibt es nur den Hinweis, dass bei WMV960/G6992 die
+     * Bytes 50-51 Energie in 0,1 kWh und 52-53 Wasser in Litern tragen sollen - ungeprueft und
+     * modellabhaengig. Deshalb: Rohwert in einen Diagnosepunkt (wenn der Sammlungskanal existiert)
+     * und eine Debug-Zeile, sobald sich etwas aendert. Als Verbrauch gedeutet wird nichts.
      *
-     * WAS DABEI HERAUSKOMMT. Je Adresse wird festgehalten, ob sie antwortet und mit welchen
-     * Feldern. Der Sinn liegt im VERGLEICH zweier Durchlaeufe: einer im Leerlauf, einer
-     * waehrend eines Programms. Die Felder, die sich dazwischen bewegen, sind die
-     * Kandidaten fuer alles, was heute noch fehlt - allen voran die verbrauchte Energie,
-     * die im bekannten Leaf 2/6195 nachweislich nicht steht (04.09.2026, alle 47 Felder in
-     * vier Ableitungen gegen die Shelly-Messung geprueft, bestes Feld 51 % daneben).
+     * @param {string} deviceId Geraete-ID
+     * @param {object} state Antwort von /State
      */
+    async extendedStateDiagnose(deviceId, state) {
+        const dev = this.devices && this.devices[deviceId];
+        const hex = state && state.ExtendedState;
+        if (!dev || typeof hex !== 'string' || !hex) {
+            if (dev && !dev.extStateGemeldet) {
+                dev.extStateGemeldet = true;
+                this.log.debug(`State ${this.kennung(deviceId)}: no ExtendedState in /State`);
+            }
+            return;
+        }
+        if (dev.extStateLetzter === hex) {
+            return;
+        }
+        dev.extStateLetzter = hex;
+        dev.extStateGemeldet = true;
+        const b = /^[0-9a-f]+$/i.test(hex) && hex.length % 2 === 0 ? Buffer.from(hex, 'hex') : null;
+        let bytes = '';
+        if (b && b.length >= 54) {
+            bytes =
+                `, bytes 50-53 ${b.subarray(50, 54).toString('hex')} ` +
+                `(u16 BE ${b.readUInt16BE(50)}/${b.readUInt16BE(52)}, LE ${b.readUInt16LE(50)}/${b.readUInt16LE(52)})`;
+        }
+        this.log.debug(
+            `State ${this.kennung(deviceId)}: ExtendedState ${b ? `${b.length} bytes` : `${hex.length} chars`}` +
+                `${bytes}: ${hex.slice(0, 160)}${hex.length > 160 ? '…' : ''}`,
+        );
+        if (this._sammlungCreated && this._sammlungCreated[deviceId]) {
+            await this.setStateChangedAsync(ids.s(deviceId, 'extendedState'), { val: hex.slice(0, 4000), ack: true });
+        }
+    }
+
     /**
-     * Gibt das Modul ueberhaupt Auskunft? Eine einzige Frage klaert das.
+     * Die Kontrollfrage: Gibt das Modul gerade Auskunft?
      *
-     * WARUM NICHT AM STATUS. Erst haben wir das am Geraetestatus festgemacht: nur scannen,
-     * wenn "Standby". Das war zu grob - der Status sagt nichts darueber, ob das Modul gerade
-     * Kapazitaet hat. Eine Spuelmaschine im Trocknen steht auf "In Betrieb" und tut dabei
-     * nichts als warten (17 W); sie ist der beste Gespraechspartner, den es gibt. Umgekehrt
-     * gibt es Geraete, die nach dem Programm sofort abschalten und nie einen Leerlauf zeigen,
-     * in dem gescannt werden koennte.
-     *
-     * WIE ES STATTDESSEN GEHT. Gefragt wird eine Adresse, die es nicht gibt. Ein
-     * gespraechsbereites Modul beantwortet sie mit 404 - "kenne ich nicht" ist eine Auskunft.
-     * Ein ausgelastetes Modul antwortet auf ALLES mit 500 oder gar nicht. Damit ist die
-     * Unterscheidung gemessen statt geraten, und zwar mit genau einer Anfrage je Durchgang.
-     *
-     * Antwortet die Adresse mit 200, existiert sie bei diesem Modell eben doch - auch das
-     * heisst "gespraechsbereit". Nur 500 und Stoerungen sprechen dagegen.
+     * WARUM NICHT AM STATUS. Der Status sagt nichts darueber, ob das Modul Kapazitaet hat; ein
+     * ausgeschaltetes Geraet kann ein waches Modul haben und umgekehrt. Gefragt wird deshalb eine
+     * Adresse, deren Antwort bekannt ist: Ein gespraechsbereites Modul antwortet mit Daten oder
+     * 404 - "kenne ich nicht" ist eine Auskunft. Ein schlafendes oder ausgelastetes Modul
+     * antwortet auf ALLES mit 500.
      *
      * @param deviceId Geraete-ID
+     * @returns {Promise<'wach'|'schlaeft'|'stoerung'|'unbekannt'>} 'unbekannt' heisst: Das Geraet
+     *          hat die Kontrolladresse nie beantwortet, es wird trotzdem versucht (siehe
+     *          leafscan.trotzdemVersuchen).
      */
-    async gespraechsbereit(deviceId) {
+    async kontrollfrage(deviceId) {
         const dev = this.devices && this.devices[deviceId];
         if (!dev) {
-            return false;
+            return 'stoerung';
         }
         this._kontrollTaub = this._kontrollTaub || {};
         this._kontrollKennt = this._kontrollKennt || {};
         const [unit, attr] = KONTROLL_ADRESSE;
         try {
-            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_MS);
+            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_LANGSAM_MS);
+            if (res.status === 503) {
+                return 'schlaeft';
+            }
             if (res.status !== 500) {
-                // Das Geraet kennt den Bereich und gibt Auskunft.
                 this._kontrollKennt[deviceId] = true;
                 this._kontrollTaub[deviceId] = 0;
-                return true;
+                return 'wach';
             }
         } catch (e) {
             this.log.debug(`${deviceId}: control request ${unit}/${attr} - ${e.message}`);
+            return 'stoerung';
         }
-
-        // Ein Geraet, das die Kontrolladresse kennt, ist jetzt eben beschaeftigt.
         if (this._kontrollKennt[deviceId]) {
-            return false;
+            return 'schlaeft';
         }
-
         this._kontrollTaub[deviceId] = (this._kontrollTaub[deviceId] || 0) + 1;
         if (
             !leafscan.trotzdemVersuchen({
@@ -3540,169 +3749,311 @@ class MieleLocal extends utils.Adapter {
                 grenze: KONTROLLE_TAUB_MAX,
             })
         ) {
-            return false;
+            return 'schlaeft';
         }
-
         if (this._kontrollTaub[deviceId] === KONTROLLE_TAUB_MAX) {
             this.log.info(
                 `${deviceId}: control address ${unit}/${attr} did not answer ${KONTROLLE_TAUB_MAX} times ` +
-                    '- this model apparently does not know the range. The scan is ' +
-                    'tried anyway and stops by itself if the appliance refuses.',
+                    '- this model apparently does not know the range. The scan is tried anyway; ' +
+                    'a 500 then only counts once the module has proven it is awake.',
             );
         }
-        return true;
-    }
-
-    async leafScanDurchgang(deviceId) {
-        const dev = this.devices && this.devices[deviceId];
-        if (!dev) {
-            this.log.warn(`Leaf scan: ${deviceId} is not connected`);
-            return;
-        }
-        // erzwingen: Der Scan ist selbst eine Diagnosefunktion und braucht den Kanal.
-        await this.ensureSammlungObjects(deviceId, true);
-
-        let bisher = {};
-        try {
-            const s = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
-            bisher = JSON.parse((s && s.val) || '{}') || {};
-        } catch {
-            bisher = {};
-        }
-
-        const offen = leafscan.naechste(bisher);
-        if (!offen.length) {
-            const f = leafscan.fortschritt(bisher);
-            this.log.info(`${deviceId}: leaf scan finished - ${f.text}`);
-            await this.setStateAsync(ids.s(deviceId, 'scanState'), { val: f.text, ack: true });
-            return;
-        }
-        this.log.info(
-            `${deviceId}: leaf scan - ${offen.length} addresses in this pass ` +
-                `(${leafscan.fortschritt(bisher).text})`,
-        );
-        let geprueft = 0;
-        let stoerungen = 0;
-        let absagen = 0;
-        let ueberlastet = false;
-
-        for (const { unit, attr } of offen) {
-            let ergebnis = { status: null };
-            try {
-                const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_MS);
-                if (res.status === 200 && res.headers['x-signature']) {
-                    ergebnis = { felder: this.leafFelder(res) };
-                } else {
-                    ergebnis = { status: res.status };
-                }
-            } catch (e) {
-                // Ein Lesefehler ist ein Ergebnis wie jedes andere: Die Adresse gilt als
-                // geprueft, sonst haengt der Scan ewig an derselben Stelle.
-                ergebnis = { status: `Fehler: ${e.message}`.slice(0, 60) };
-            }
-            /*
-             * Nur festhalten, was das Geraet WIRKLICH beantwortet hat.
-             *
-             * Ein 503 oder ein abgebrochener Socket ist keine Auskunft ueber die Adresse,
-             * sondern ueber den Zustand des Moduls. Wer ihn als Ergebnis ablegt, hakt eine
-             * Adresse ab, die nie gefragt wurde - siehe leafscan.beantwortet.
-             */
-            if (leafscan.beantwortet(ergebnis)) {
-                bisher = leafscan.aufnehmen(bisher, unit, attr, ergebnis);
-            }
-
-            /*
-             * Aufhoeren, bevor das Modul aufgibt.
-             *
-             * Am 04.09.2026 warf die Waschmaschine nach rund 170 Adressen ihre Verbindung
-             * ab - lokal und zur Cloud, und beide kamen von selbst nicht zurueck. Die
-             * Vorboten standen im Ergebnis: abgebrochene Sockets und Zeitueberschreitungen
-             * zwischen ansonsten sauberen Absagen. Genau die zaehlt dieser Zaehler.
-             */
-            if (leafscan.beschaeftigt(ergebnis)) {
-                /*
-                 * "Gerade nicht" ist keine Niederlage.
-                 *
-                 * Waehrend eines Programms beantwortet das Modul fast jede Frage mit 503 -
-                 * frueher brach der Durchgang danach ab, und der Scan kam ueber 23 von 882
-                 * Adressen nicht hinaus. Jetzt wird gewartet, immer laenger, und dieselbe
-                 * Adresse noch einmal gefragt. Der Zaehler steht still: Ein beschaeftigtes
-                 * Geraet ist kein ueberlastetes.
-                 */
-                if (++absagen <= leafscan.ABSAGEN_JE_ADRESSE) {
-                    const warten = leafscan.wartezeitMs(absagen);
-                    this.log.debug(
-                        `${deviceId}: ${unit}/${attr} is busy - ` + `waiting ${warten / 1000}s and asking again`,
-                    );
-                    await new Promise(r => this.setTimeout(r, warten));
-                    continue; // dieselbe Adresse noch einmal
-                }
-                // Nach mehreren Anlaeufen weiterziehen - die Adresse bleibt offen.
-                this.log.info(`${deviceId}: ${unit}/${attr} stays busy, ` + 'trying again later');
-                absagen = 0;
-                stoerungen = 0;
-                continue;
-            }
-            absagen = 0;
-
-            if (leafscan.ueberlastet(ergebnis)) {
-                if (++stoerungen >= leafscan.ABBRUCH_FEHLER) {
-                    /*
-                     * INFO, NICHT WARN. Ein ueberlastetes Modul ist hier der Normalfall, kein
-                     * Fehler: Waehrend eines Programms kommt es mit den vielen Leaf-Anfragen nicht
-                     * mit, und der Scan setzt spaeter ab dem gesicherten Fortschritt fort. Als
-                     * Warnung stand diese Zeile vom 05. bis 11.09.2026 271-mal im Log, ohne dass
-                     * je etwas zu tun gewesen waere - und verdeckte damit echte Warnungen.
-                     */
-                    this.log.info(
-                        `${deviceId}: leaf scan aborted - ${stoerungen} ` +
-                            'connection errors in a row. The appliance cannot keep up; ' +
-                            'continuing later, the progress is saved.',
-                    );
-                    ueberlastet = true;
-                    break;
-                }
-            } else {
-                stoerungen = 0;
-            }
-
-            // Zwischenspeichern, damit ein Abbruch nicht den ganzen Durchgang kostet.
-            if (++geprueft % leafscan.SICHERN_ALLE === 0) {
-                await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
-                await this.setStateAsync(ids.s(deviceId, 'scanState'), {
-                    val: leafscan.fortschritt(bisher).text,
-                    ack: true,
-                });
-            }
-            // Dem Geraet Luft lassen - es bedient immer nur eine Verbindung.
-            await new Promise(r => this.setTimeout(r, leafscan.PAUSE_MS));
-        }
-
-        await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
-        const f = leafscan.fortschritt(bisher);
-        await this.setStateAsync(ids.s(deviceId, 'scanState'), { val: f.text, ack: true });
-        const t = leafscan
-            .treffer(bisher)
-            .slice(0, 12)
-            .map(x => `${x.leaf} (${x.felder} fields)`)
-            .join(', ');
-        this.log.info(`${deviceId}: leaf scan - ${f.text}${t ? `. So far: ${t}` : ''}`);
-        return { ueberlastet };
+        return 'unbekannt';
     }
 
     /**
-     * Durchgang um Durchgang, bis der Scan fertig ist.
+     * Den langsamen Leaf-Scan anwerfen - je Geraet mit gesetztem Schalter eine eigene Schleife,
+     * falls fuer dieses Geraet noch keine laeuft. Siehe lib/scanplaner.js.
      *
-     * WANN ER LAEUFT: solange der Schalter `sammlung.leafScan` steht. Der Nutzer legt ihn um,
-     * wenn Zeit ist - typisch nach einem Programm, wenn das Geraet noch wach im Leerlauf steht
-     * und stundenlang nichts anderes zu tun hat. Ein Adapterneustart beendet den Dauerlauf; der
-     * Fortschritt ist gesichert, und ein erneutes Umlegen macht dort weiter, wo er stand.
-     *
-     * WARUM DIE PAUSE DAZWISCHEN so viel groesser ist als die zwischen zwei Adressen: Ein
-     * Durchgang sind vierzig Anfragen am Stueck. Danach bekommt das Modul eine Minute fuer
-     * sich - Zeit genug, um Cloud, App und die eigene Steuerung zu bedienen, bevor der naechste
-     * Schwung kommt. Am 04.09.2026 hatte es ohne solche Pausen die Verbindung abgeworfen.
+     * JE GERAET EIN EIGENER TAKT (seit 13.11.2026 abends): hoechstens eine Anfrage je
+     * leafscan.TAKT_MS und Geraet, nie zwei gleichzeitig an dasselbe Geraet. Verschiedene Geraete
+     * laufen unabhaengig und parallel - ein haengender Backofen haelt Wasch- und Spuelmaschine nicht
+     * mehr auf. Eine Schleife endet von selbst, sobald ihr Schalter faellt.
      */
+    scanPlanerStarten() {
+        if (this.stopping) {
+            return;
+        }
+        this._scan = this._scan || {};
+        if (!this._scanPlaner) {
+            this._scanPlaner = new ScanPlaner({
+                geraete: () => Object.keys(this.devices || {}),
+                aktiv: async deviceId => {
+                    const st = await this.getStateAsync(ids.s(deviceId, 'scan'));
+                    return !!(st && st.val === true);
+                },
+                schritt: deviceId => this.scanSchritt(deviceId),
+                beendet: async deviceId => {
+                    if (this._scan[deviceId]) {
+                        // Abgeschaltet: Ungesichertes sichern und den Zwischenstand vergessen -
+                        // beim naechsten Einschalten wird frisch aus dem Datenpunkt gelesen.
+                        await this.scanSichern(deviceId, true);
+                        delete this._scan[deviceId];
+                        this.log.info(`${deviceId}: leaf scan stopped.`);
+                    }
+                },
+                warten: ms => new Promise(r => this.setTimeout(r, ms)),
+                stopp: () => !!this.stopping,
+                log: this.log,
+                taktMs: leafscan.TAKT_MS,
+            });
+        }
+        this._scanPlaner.starten().catch(e => this.log.warn(`Leaf scan could not be started - ${e.message}`));
+    }
+
+    /**
+     * Den Scan-Zwischenstand eines Geraets sichern (scanJson, scanJsonAnonym, scanState).
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {boolean} [nurWennNoetig] nur schreiben, wenn seit dem letzten Mal etwas dazukam
+     */
+    async scanSichern(deviceId, nurWennNoetig = false) {
+        const z = this._scan && this._scan[deviceId];
+        if (!z || !z.bisher || (nurWennNoetig && !z.ungespeichert)) {
+            return;
+        }
+        await this.scanErgebnisSchreiben(deviceId, z.bisher);
+        z.ungespeichert = 0;
+        await this.scanStandMelden(deviceId);
+    }
+
+    /**
+     * collection.scanState schreiben: Fortschritt und, wenn der Scan gerade wartet, warum.
+     *
+     * @param {string} deviceId Geraete-ID
+     */
+    async scanStandMelden(deviceId) {
+        const z = this._scan && this._scan[deviceId];
+        if (!z || !z.bisher) {
+            return;
+        }
+        let text = leafscan.fortschritt(z.bisher).text;
+        if (z.warum) {
+            text += ` - ${z.warum}`;
+        }
+        await this.setStateChangedAsync(ids.s(deviceId, 'scanState'), { val: text, ack: true });
+    }
+
+    /**
+     * Ein Schritt des langsamen Scans fuer ein Geraet: hoechstens EINE Anfrage.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @returns {Promise<'gefragt'|'warten'|'ausweichen'|number>} 'gefragt', wenn eine Anfrage an das
+     *          Geraet ging; 'ausweichen', wenn die normale Abfrage gerade dran ist; eine Zahl nennt
+     *          die Wartezeit in ms bis zum naechsten sinnvollen Versuch
+     */
+    async scanSchritt(deviceId) {
+        const dev = this.devices && this.devices[deviceId];
+        if (!dev) {
+            return 'warten';
+        }
+        const jetzt = Date.now();
+        let z = this._scan[deviceId];
+        if (!z) {
+            await this.ensureSammlungObjects(deviceId, true);
+            let bisher = {};
+            try {
+                const s = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
+                bisher = JSON.parse((s && s.val) || '{}') || {};
+            } catch {
+                bisher = {};
+            }
+            z = this._scan[deviceId] = { bisher, pauseBis: 0, fehler: 0, wachBis: 0, ungespeichert: 0, warum: '' };
+            this.log.info(`${deviceId}: leaf scan running - ${leafscan.fortschritt(bisher).text}`);
+        }
+        const warten = async warum => {
+            if (z.warum !== warum) {
+                z.warum = warum;
+                await this.scanSichern(deviceId);
+            }
+            return 'warten';
+        };
+        const uhr = t => new Date(t).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        if (z.pauseBis > jetzt) {
+            return z.pauseBis - jetzt;
+        }
+
+        /*
+         * Kein Programm, Status seit einer Weile ruhig, normale Abfrage erreicht das Geraet.
+         * Waehrend einer Feinaufzeichnung bleibt das Modul ebenfalls in Ruhe.
+         */
+        const status = await this.getStateAsync(`${deviceId}.state.status`);
+        const erlaubt = leafscan.scanErlaubt({
+            status: status && status.val,
+            seitMs: status ? jetzt - (status.lc || status.ts || jetzt) : 0,
+            verbunden: dev.erreichbar !== false,
+        });
+        if (!erlaubt || (this.feinTimer && this.feinTimer[deviceId])) {
+            z.wachBis = 0;
+            return warten(`waiting: appliance busy (status ${status && status.val}) or not reachable`);
+        }
+        // Im Programm gebremst: je Geraet hoechstens eine Anfrage pro BETRIEB_ABSTAND_MS.
+        // Ebenso eine Stunde lang nach einer Stoerung (Schonphase): Der Backofen H2469BP lief am
+        // 13.11.2026 bei 25 s Takt nach rund zehn Adressen in Timeouts, waehrend /State weiter
+        // antwortete.
+        const gebremst = erlaubt === 'betrieb' || (z.schonBis && z.schonBis > jetzt);
+        if (gebremst && z.letzteAnfrage && jetzt - z.letzteAnfrage < leafscan.BETRIEB_ABSTAND_MS) {
+            return z.letzteAnfrage + leafscan.BETRIEB_ABSTAND_MS - jetzt;
+        }
+        /*
+         * Der normalen Abfrage ausweichen: Laeuft gerade eine Anfrage an dieses Geraet oder steht
+         * eine an (/State, EcoFeedback, Steuerbefehl), wartet der Scan ein paar Sekunden. Die
+         * Warteschlange in lib/api.js wuerde ihn ohnehin hinten anstellen - so drueckt er aber
+         * nicht direkt hinter der normalen Abfrage nach.
+         */
+        if (dev.api && dev.api.offen > 0) {
+            return 'ausweichen';
+        }
+        z.letzteAnfrage = jetzt;
+
+        // Ist das Modul wach? Ein Beleg gilt WACH_GUELTIG_MS; danach erst die Kontrollfrage.
+        if (z.wachBis <= jetzt && !z.ohneKontrolle) {
+            const k = await this.kontrollfrage(deviceId);
+            if (k === 'wach') {
+                z.wachBis = Date.now() + leafscan.WACH_GUELTIG_MS;
+                if (leafscan.fehlerVerzeihen(z.schonBis, Date.now())) {
+                    z.fehler = 0;
+                }
+                if (z.warum) {
+                    z.warum = '';
+                    await this.scanStandMelden(deviceId);
+                }
+            } else if (k === 'unbekannt') {
+                z.ohneKontrolle = true;
+            } else if (k === 'schlaeft') {
+                z.pauseBis = Date.now() + leafscan.RUHE_MS;
+                this.log.debug(
+                    `${deviceId}: leaf scan - module not talking (control 500/503), next try ${uhr(z.pauseBis)}`,
+                );
+                await warten(`waiting: module asleep, next try ${uhr(z.pauseBis)}`);
+            } else {
+                this.scanRueckzug(deviceId, z, 'control request failed');
+                await warten(`paused until ${uhr(z.pauseBis)} after ${z.fehler} connection error(s)`);
+            }
+            return 'gefragt';
+        }
+
+        const adr = leafscan.naechsteAdresse(z.bisher, jetzt);
+        if (!adr) {
+            const f = leafscan.fortschritt(z.bisher);
+            if (!f.offen) {
+                z.warum = '';
+                await this.scanSichern(deviceId);
+                this.log.info(`${deviceId}: leaf scan finished - ${f.text}`);
+                await this.setStateAsync(ids.s(deviceId, 'scan'), { val: false, ack: true });
+                delete this._scan[deviceId];
+                return 'warten';
+            }
+            z.pauseBis = jetzt + 15 * 60000;
+            return warten(`waiting: remaining addresses are due for confirmation later`);
+        }
+
+        const { unit, attr } = adr;
+        // Im Programm zaehlt ein 500 nie - das Modul ist dann oft nur ausgelastet.
+        const wach = z.wachBis > jetzt && erlaubt === 'ruhe';
+        let ergebnis;
+        try {
+            const res = await dev.api.readDop2(dev.route, unit, attr, 0, 0, leafscan.SCAN_TIMEOUT_LANGSAM_MS);
+            if (res.status === 200 && res.headers['x-signature']) {
+                /*
+                 * Eine Antwort, die sich nicht dekodieren laesst, ist trotzdem eine Antwort -
+                 * Status 200, Fehlertext daneben, Rohdaten zur spaeteren Auswertung. Ein leeres
+                 * Leaf ebenso: Die Adresse gibt es.
+                 */
+                try {
+                    const felderGelesen = this.leafFelder(res);
+                    ergebnis =
+                        felderGelesen && Object.keys(felderGelesen).length
+                            ? { felder: felderGelesen }
+                            : { status: 200, fehler: 'empty leaf', roh: this.leafRoh(res) };
+                } catch (e) {
+                    ergebnis = { status: 200, fehler: e.message, roh: this.leafRoh(res) };
+                    this.log.debug(`${this.kennung(deviceId)}: ${unit}/${attr} answers, but ${e.message}`);
+                }
+            } else {
+                ergebnis = { status: res.status };
+            }
+        } catch (e) {
+            ergebnis = { status: `Fehler: ${e.message}`.slice(0, 60) };
+        }
+
+        if (leafscan.beschaeftigt(ergebnis) && wach) {
+            // Wach und in Ruhe, und trotzdem 503: liegt an der Adresse - vermerken, weiterziehen.
+            z.bisher = leafscan.einordnen(z.bisher, unit, attr, ergebnis, {
+                wach,
+                jetzt: Date.now(),
+                besetztJeAdresse: true,
+            });
+            z.ungespeichert++;
+            this.log.debug(`${deviceId}: leaf scan - ${unit}/${attr} busy (503) although awake, retried later`);
+            return 'gefragt';
+        }
+        if (leafscan.beschaeftigt(ergebnis)) {
+            // "Gerade nicht" - keine Auskunft ueber die Adresse, nur ueber das Modul.
+            z.wachBis = 0;
+            z.pauseBis = Date.now() + leafscan.RUHE_MS;
+            this.log.debug(`${deviceId}: leaf scan - ${unit}/${attr} busy (503), next try ${uhr(z.pauseBis)}`);
+            await warten(`waiting: module busy, next try ${uhr(z.pauseBis)}`);
+            return 'gefragt';
+        }
+
+        const vorher = z.bisher[leafscan.schluessel(unit, attr)];
+        z.bisher = leafscan.einordnen(z.bisher, unit, attr, ergebnis, { wach, jetzt: Date.now() });
+        z.ungespeichert++;
+
+        if (leafscan.ueberlastet(ergebnis)) {
+            this.scanRueckzug(deviceId, z, `${unit}/${attr}: ${String(ergebnis.status).replace(/^Fehler: /, '')}`);
+            await warten(`paused until ${uhr(z.pauseBis)} after ${z.fehler} connection error(s)`);
+            return 'gefragt';
+        }
+        if (leafscan.fehlerVerzeihen(z.schonBis, Date.now())) {
+            z.fehler = 0;
+        }
+
+        const neu = z.bisher[leafscan.schluessel(unit, attr)];
+        const st = Number(ergebnis.status);
+        if (neu.antwortet || st === 404 || st === 101) {
+            // Das Modul unterscheidet - es ist wach.
+            z.wachBis = Date.now() + leafscan.WACH_GUELTIG_MS;
+        }
+        if (neu.antwortet) {
+            const umfang = neu.anzahl ? ` with ${neu.anzahl} fields` : ` (${neu.fehler})`;
+            const frueher = vorher && !vorher.antwortet ? ` (before: ${vorher.status})` : '';
+            this.log.info(`${deviceId}: leaf scan - ${unit}/${attr} answers${umfang}${frueher}`);
+            await this.scanSichern(deviceId);
+        } else {
+            this.log.debug(
+                `${deviceId}: leaf scan - ${unit}/${attr} status ${neu.status}, ` +
+                    `confirmed ${leafscan.bestaetigungen(neu)}x${wach || neu.status !== 500 ? '' : ' (500 not counted)'}`,
+            );
+            if (z.ungespeichert >= 10) {
+                await this.scanSichern(deviceId);
+            }
+        }
+        return 'gefragt';
+    }
+
+    /**
+     * Rueckzug nach einer Stoerung: 5, 10, 20, 30 Minuten Ruhe fuer dieses Geraet.
+     *
+     * Am 13.11.2026 lehnte die Waschmaschine waehrend des Scans Verbindungen ab, die Spuelmaschine
+     * war eine Minute ganz weg. Wer dann weiterfragt, macht es schlimmer.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {object} z Scan-Zustand des Geraets
+     * @param {string} grund was schiefging
+     */
+    scanRueckzug(deviceId, z, grund) {
+        z.fehler++;
+        z.wachBis = 0;
+        const pause = leafscan.rueckzugMs(z.fehler);
+        z.pauseBis = Date.now() + pause;
+        z.schonBis = z.pauseBis + 3600000;
+        this.log.info(
+            `${deviceId}: leaf scan pausing ${pause / 60000} min after connection error ${z.fehler} in a row (${grund})`,
+        );
+    }
+
     /**
      * Eine Runde ueber alle Geraete, die gerade arbeiten.
      *
@@ -3745,6 +4096,38 @@ class MieleLocal extends utils.Adapter {
      */
     leafFelder(res) {
         return this.leafLesen(res).werte;
+    }
+
+    /**
+     * Die entschluesselten Bytes eines Leafs als Hex-Text - fuer Antworten, die der Parser nicht
+     * versteht. Auf 4000 Zeichen begrenzt, damit ein grosses Leaf den Datenpunkt nicht sprengt.
+     *
+     * @param res Antwort der Leaf-Abfrage
+     * @returns {string|null} Hex-Text, null wenn auch das Entschluesseln scheitert
+     */
+    leafRoh(res) {
+        try {
+            return this.mc.decryptResponse(res.headers['x-signature'], res.body).toString('hex').slice(0, 4000);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Das Scan-Ergebnis schreiben - vollstaendig und ohne Kennungen.
+     *
+     * scanJson enthaelt alles, was das Geraet geantwortet hat, also auch Seriennummer (2/145),
+     * Modulnummer (14/1566), MAC (14/1571) und IP/WLAN-Name (14/1573). Zum Teilen in Foren oder
+     * Fehlerberichten dient scanJsonAnonym: dieselben Daten, diese Felder maskiert - siehe
+     * leafscan.anonymisieren.
+     *
+     * @param {string} deviceId Geraete-ID
+     * @param {object} bisher Scan-Ergebnis
+     */
+    async scanErgebnisSchreiben(deviceId, bisher) {
+        await this.setStateAsync(ids.s(deviceId, 'scanJson'), { val: JSON.stringify(bisher), ack: true });
+        const anonym = leafscan.anonymisieren(bisher, [deviceId]);
+        await this.setStateAsync(ids.s(deviceId, 'scanJsonAnonym'), { val: JSON.stringify(anonym), ack: true });
     }
 
     /**
@@ -3811,8 +4194,32 @@ class MieleLocal extends utils.Adapter {
         }
         const bekannt = this._dpAngelegt[deviceId] || (this._dpAngelegt[deviceId] = {});
         let geschrieben = 0;
+        let laeuft = null;
         for (const d of defs) {
             const id = `${deviceId}.detail.${d.kanal}.${d.sub}`;
+            /*
+             * Endstand der Antriebsenergie halten (2/6195 Feld 16).
+             *
+             * Das Geraet nullt den Zaehler beim Uebergang in den Ruhezustand. Steht kein Programm,
+             * bleibt deshalb der letzte Wert groesser 0 stehen - der Datenpunkt bedeutet
+             * "laufendes oder zuletzt beendetes Programm", wie eco.water. Siehe
+             * ecoRegel.endstandHalten.
+             */
+            if (leaf === `${ECO_LEAF.unit}/${ECO_LEAF.attr}` && d.wert === 0 && d.sub === 'energyConsumed') {
+                if (laeuft === null) {
+                    const st = await this.getStateAsync(`${deviceId}.state.status`);
+                    laeuft = !!(st && (st.val === 5 || st.val === 6));
+                }
+                const alt = laeuft ? null : await this.getStateAsync(id);
+                const { gehalten } = ecoRegel.endstandHalten(
+                    { 16: alt && typeof alt.val === 'number' ? alt.val : null },
+                    { 16: 0 },
+                    laeuft,
+                );
+                if (gehalten.length) {
+                    continue;
+                }
+            }
             if (!bekannt[id]) {
                 // Der Kanal einmal je Geraet - extendObject ist genuegsam, aber nicht umsonst.
                 if (!bekannt[`kanal:${d.kanal}`]) {
@@ -4065,7 +4472,7 @@ class MieleLocal extends utils.Adapter {
                 continue;
             }
             this.log.info(`${deviceId}: leaf scan resumed after restart`);
-            this.leafScanDauerlauf(deviceId).catch(e => this.log.warn(`${deviceId}: leaf scan failed - ${e.message}`));
+            this.scanPlanerStarten();
         }
     }
 
@@ -4241,86 +4648,7 @@ class MieleLocal extends utils.Adapter {
         );
         await this.ensureSammlungObjects(deviceId, true);
         await this.setStateAsync(ids.s(deviceId, 'scan'), { val: true, ack: true });
-        this.leafScanDauerlauf(deviceId).catch(e => this.log.warn(`${deviceId}: leaf scan failed - ${e.message}`));
-    }
-
-    async leafScanDauerlauf(deviceId) {
-        for (;;) {
-            const laeuft = await this.getStateAsync(ids.s(deviceId, 'scan'));
-            if (!laeuft || laeuft.val !== true) {
-                this.log.info(`${deviceId}: leaf scan stopped.`);
-                return;
-            }
-
-            /*
-             * Ein ausgeschaltetes Geraet nicht befragen - es antwortet auf ALLES mit 500.
-             *
-             * Das ist die teuerste Falle des ganzen Verfahrens: Diese 500er sehen aus wie
-             * "gibt es nicht" und werden als geprueft abgelegt. Ein Scan, der am schlafenden
-             * Geraet durchlaeuft, meldet danach "882 von 882 geprueft" und hat in Wahrheit
-             * keine einzige Adresse ernsthaft gefragt.
-             *
-             * Am 06.09.2026 an der Spuelmaschine G5840 genau so geschehen: 875 Adressen mit
-             * 500 abgehakt, ein einziger Treffer - waehrend die baugleich angebundene
-             * Waschmaschine zehn Leafs lieferte.
-             *
-             * EIN LAUFENDES PROGRAMM IST GENAUSO SCHLECHT. Das war zuerst uebersehen: Am
-             * 07.09.2026 lief der Scan an der arbeitenden Spuelmaschine und lieferte 102
-             * Adressen, davon 102 mit 500 - ausnahmslos, ohne ein einziges 404 dazwischen.
-             * Ein Geraet, das wirklich antwortet, unterscheidet (die Waschmaschine lieferte
-             * 500er UND 404er UND Treffer). Zur selben Zeit beantwortete die ebenfalls
-             * arbeitende Waschmaschine Anfragen auf ein Leaf, das sie nachweislich hat, nur
-             * noch mit Timeouts. Waehrend eines Programms hat das Modul schlicht keine
-             * Kapazitaet, und seine Absagen bedeuten nichts.
-             *
-             * Gescannt wird deshalb nur im Leerlauf: Status 7 heisst "Standby" und ist der
-             * beste Zeitpunkt ueberhaupt, 1 heisst "aus". Alles dazwischen heisst, dass ein
-             * Programm laeuft.
-             */
-            const zustand = await this.getStateAsync(`${deviceId}.state.status`);
-            if (zustand && Number(zustand.val) === 1) {
-                this.log.debug(`${deviceId}: leaf scan waiting - appliance is off`);
-                await new Promise(r => this.setTimeout(r, PAUSE_ZWISCHEN_DURCHGAENGEN_MS));
-                continue;
-            }
-            if (!(await this.gespraechsbereit(deviceId))) {
-                this.log.debug(`${deviceId}: leaf scan waiting - module does not answer`);
-                await new Promise(r => this.setTimeout(r, PAUSE_ZWISCHEN_DURCHGAENGEN_MS));
-                continue;
-            }
-
-            const vorher = await this.getStateAsync(ids.s(deviceId, 'scanJson'));
-            let stand = {};
-            try {
-                stand = JSON.parse((vorher && vorher.val) || '{}') || {};
-            } catch {
-                stand = {};
-            }
-            if (!leafscan.naechste(stand, 1).length) {
-                this.log.info(`${deviceId}: leaf scan finished - nothing left to scan.`);
-                await this.setStateAsync(ids.s(deviceId, 'scan'), { val: false, ack: true });
-                return;
-            }
-
-            const lauf = await this.leafScanDurchgang(deviceId);
-            /*
-             * Nach einer Ueberlastung nicht nach einer Minute wieder anklopfen.
-             *
-             * Die Bremse im Durchgang beendet nur DIESEN Durchgang - der Dauerlauf startete
-             * danach den naechsten nach der ueblichen Minute, und das Ganze von vorn: vierzig
-             * Adressen, fuenf Stoerungen, Abbruch, eine Minute Pause. Am 07.09.2026 lief das
-             * eine halbe Stunde so, waehrend beide Maschinen arbeiteten; die Waschmaschine
-             * beantwortete daraufhin nicht einmal mehr ihr Eco-Leaf. Ein Geraet, das gerade
-             * nicht kann, braucht Ruhe und keinen neuen Anlauf im Minutentakt.
-             */
-            const pause = lauf && lauf.ueberlastet ? PAUSE_NACH_UEBERLASTUNG_MS : PAUSE_ZWISCHEN_DURCHGAENGEN_MS;
-            if (lauf && lauf.ueberlastet) {
-                this.log.info(
-                    `${deviceId}: leaf scan paused for ` + `${pause / 60000} minutes - the appliance needs a rest.`,
-                );
-            }
-            await new Promise(r => this.setTimeout(r, pause));
-        }
+        this.scanPlanerStarten();
     }
 
     async onStateChange(id, state) {
@@ -4391,7 +4719,6 @@ class MieleLocal extends utils.Adapter {
         }
 
         if (scanIdx > 0 && parts[scanIdx + 1] === ids.SAMMLUNG.scan) {
-            const geraet = parts[scanIdx - 1];
             if (state.val === true) {
                 /*
                  * DER SCHALTER BLEIBT STEHEN - er bedeutet "scanne, bis fertig".
@@ -4401,13 +4728,12 @@ class MieleLocal extends utils.Adapter {
                  * Leerlauf antwortet, haette jemand zwei Dutzend Mal danebenstehen muessen -
                  * der Scan kam in vier Wochen ueber 23 Adressen nicht hinaus.
                  *
-                 * Jetzt laeuft er weiter, Durchgang um Durchgang, bis nichts mehr offen ist
-                 * oder der Schalter umgelegt wird. Zwischen den Durchgaengen liegt eine
-                 * Verschnaufpause; wird das Geraet in dieser Zeit gebraucht, sagt es mit 503
-                 * ab, und der Scan wartet geduldig (siehe leafscan.beschaeftigt).
+                 * Jetzt laeuft er weiter, bis nichts mehr offen ist oder der Schalter umgelegt
+                 * wird - seit 13.11.2026 langsam: je Geraet ein eigener Takt (lib/scanplaner.js),
+                 * eine Anfrage je 25 s, im Programm gebremst (siehe leafscan.scanErlaubt).
                  */
                 await this.setStateAsync(id, { val: true, ack: true });
-                this.leafScanDauerlauf(geraet).catch(e => this.log.warn(`${geraet}: leaf scan failed - ${e.message}`));
+                this.scanPlanerStarten();
             } else {
                 await this.setStateAsync(id, { val: false, ack: true });
             }
@@ -5209,6 +5535,10 @@ class MieleLocal extends utils.Adapter {
     async onUnload(callback) {
         this.stopping = true;
         try {
+            // Was der langsame Scan seit der letzten Sicherung gefunden hat, nicht verlieren.
+            for (const deviceId of Object.keys(this._scan || {})) {
+                await this.scanSichern(deviceId, true).catch(() => {});
+            }
             if (this.pollTimer) {
                 this.clearTimeout(this.pollTimer);
             }

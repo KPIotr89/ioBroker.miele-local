@@ -95,7 +95,7 @@
   "Sweden": "Szwecja",
   "Switzerland": "Szwajcaria",
   "The adapter retrieves local credentials (GroupID/GroupKey) once by signing in with your Miele account. The Miele app continues to work as before. No credentials are transmitted to third parties.": "Adapter jednorazowo pobiera lokalne dane dostępowe (GroupID/GroupKey) poprzez logowanie do konta Miele. Aplikacja Miele działa dalej bez zmian. Żadne dane dostępowe nie są przekazywane osobom trzecim.",
-  "The consumption reported by the appliance is an estimate, not a measurement. If you have a metering plug in front of it, enter its meter state here.": "Zużycie podawane przez urządzenie to szacunek, nie pomiar. Jeśli przed nim jest gniazdo pomiarowe, wpisz tutaj jego punkt licznika.",
+  "The energy reported by the appliance is only its planned heating energy, not a measurement. If you have a metering plug in front of it, enter its meter state here.": "Energia podawana przez urządzenie to tylko planowana energia grzania, a nie pomiar. Jeśli przed nim jest gniazdko pomiarowe, wpisz tutaj jego punkt danych licznika.",
   "These settings serve troubleshooting and field mapping. They are not needed for daily operation and are off by default. Collected data stays in this instance.": "Te ustawienia służą do rozwiązywania problemów i przypisywania pól. Nie są potrzebne w codziennej pracy i są domyślnie wyłączone. Zebrane dane pozostają w tej instancji.",
   "USA": "USA",
   "United Kingdom": "Wielka Brytania",

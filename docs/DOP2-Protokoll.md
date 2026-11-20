@@ -52,7 +52,18 @@ Entschlüsselter Leaf:
 Feld:   [index(1B), type(1B), value(wireLength)]   (Padding 0x00 zwischen Struct-Feldern)
 ```
 Feldtypen (Auszug): 1=bool, 2=U8, 3=S8, 5=U16, 6=S16, 8=U32, 9=S32, 11=U64, 14=float32,
-15=float64, 16=struct, 18/32=string, 17/20/21/22/23/25/27=Arrays. Integer sind **Big-Endian**.
+15=float64, 16=struct, 18/32=string, 17/20/21/22/23/25/27=Arrays, **33=Liste von Strukturen**
+(AStruct). Integer sind **Big-Endian**. Genau genommen ist die Feldnummer ein u16 (das „Padding"
+ist ihr oberes Byte) und die Feldzahl einer Struktur ebenfalls.
+
+**Typ 33 (AStruct, seit der Version nach 0.5.2):** `u16 Anzahl Elemente`, dann je Element
+`u16 Anzahl Felder` und die Felder als `[u16 Nummer, u8 Typ, Wert]`. Kommt u. a. in 2/1585 Feld 6.7
+(TwinDos/AutoDos-Behälter), 2/17 und 2/131 vor. Bis 0.5.2 brach der Parser daran mit
+`Unknown DOP2 field type 33` ab – für das ganze Leaf.
+
+**Einheitentyp der Generic-Hülle:** Sub-Feld 6 nennt, was gezählt wird – 121 = Wh, 45 = kWh,
+44 = l (ha-miele-at-lan, an G7197/G7655 gegen die App geprüft). 2/1585 Feld 6.5/6.6 (Lebenszähler
+der Spülmaschine) tragen 121 bzw. 44. Ohne Typangabe bleibt es beim Rohwert.
 ### Wertehüllen — zwei Bauarten, zwei Stellen
 
 Jeder Messwert steckt in einer kleinen Struktur. Es gibt **zwei** davon, und sie sind an ihrer
@@ -86,7 +97,8 @@ Typangaben von `MieleRESTServer`.
 | `2/6192` / `2/6193` | Aktoren / Sensoren der Waschmaschine |
 | `2/256` | DeviceState (Legacy-Vollzustand, u. a. #7 Restzeit s, #8 Laufzeit s) |
 | `2/1584` | Programmliste (IDs, Dauer, Temperatur) |
-| `2/1585` | GLOBAL_DeviceContext — Feld 6 trägt das **EcoFeedback des Geräts** |
+| `2/1585` | GLOBAL_DeviceContext — Feld 6 trägt das **EcoFeedback des Geräts** (6.3/6.4 letztes Programm, 6.5/6.6 Lebenszähler, 6.7 Dosierbehälter) |
+| `2/391` | laut Namenstabelle ebenfalls DeviceContext; Ersatz, wenn 2/1585 nichts liefert |
 | `2/145` | Kennung: #1 Seriennummer, #3 Modell, #4 Materialnummer (eigene Messung, G5840) |
 | `14/1570` / `14/1571` | Programm- und Optionsliste der Gargeräte (ha-miele-at-lan) |
 
@@ -102,8 +114,20 @@ die `ha-miele-at-lan` zusätzlich kennt.
 | G5840 (Spülmaschine) | 19 | u. a. 2/119, 2/145, 2/173, 2/174, 2/256 — **kein** 2/6195 |
 | H2469BP (Backofen) | 0 | alle 882 gescannten Adressen 404; Unit 14 war nie gefragt |
 
-Keines der drei Geräte kennt 2/1585 (XKM EK037/EK057, HTTP 404) — dort, wo das EcoFeedback des
-Herstellers stünde. Für sie zählt der Adapter die Impulse des Durchflusszählers (Feld 21 ÷ 200).
+Bis 12.11.2026 hatte keines der drei Geräte 2/1585 beantwortet (Scan: 404). **Am 13.11.2026
+antworteten WCR860 und G5840 mit 200** (beide liefen): G5840 nur Lebenszähler 6.5 = 1.467.400 Wh
+(Typ 121), 6.6 = 20.676 l (Typ 44); WCR860 6.3 = 206 / 6.5 = 2.508.477 (Typ 46 „EcoEnergyWatt“, als Wh
+gelesen), 6.4 = 27 l / 6.6 = 196.620 l (Typ 44). H2469BP (EK057): 404. Für sie zählt der Adapter die Impulse des
+Durchflusszählers (Feld 21 ÷ 200). Seit der Version nach 0.5.2 wird 2/1585 (und 2/391) unabhängig
+von 2/6195 gefragt; bis dahin lief die Abfrage nur nach einer erfolgreichen Antwort auf 2/6195 und
+erreichte die Spülmaschine nie.
+
+### /State.ExtendedState
+Hex-Text in der Antwort auf `GET Devices/<serie>/State`. Für Kochfelder ist der Aufbau belegt
+(ha-miele-at-lan, `extended_state.py`). Für Waschmaschinen gibt es nur den Hinweis, dass bei
+WMV960/G6992 die Bytes 50–51 Energie (0,1 kWh) und 52–53 Wasser (l) tragen sollen — ungeprüft,
+modellabhängig. Der Adapter legt den Rohwert nur als Diagnose ab (`collection.extendedState`) und
+protokolliert auf debug die Bytes 50–53, deutet aber nichts.
 
 ### UserRequest-Payload (2/1583)
 ```
@@ -133,15 +157,23 @@ H2469BP (EK057 08.37): jeder DOP2-Leaf 404.
 ### ProcessData (2/6195, Waschmaschine WCR860 — empirisch)
 Feld-Indizes (1-based), Nutzwert = interpretiertes Struct-Sub-Feld:
 
-| Feld | Bedeutung | Skalierung | gegen Cloud verifiziert |
-|---|---|---|---|
-| #8..#12 | heaterRelay / lyePump / circulationPump / coldWaterValve / hotWaterValve (bool) | — | Bestätigt die Index-Ausrichtung |
-| **#25** | Energieverbrauch | Wh (÷1000 → kWh) | 1991 → 1,991 kWh ≈ Cloud 1,9 |
-| **#40** | Wasserverbrauch | 0,1 l (÷10 → l) | 953 → 95,3 l ≈ Cloud 96 |
+Stand 13.11.2026 (31 bzw. 56 Läufe gegen Messsteckdose; frühere Einträge „#25 Energieverbrauch“ und
+„#40 Wasser“ waren falsch):
 
-> Achtung: Die in MieleRESTServer dokumentierten Indizes 16/17 (energyConsumed/water) stimmten
-> für dieses Modell NICHT. Die korrekten Indizes wurden per Cloud-Abgleich ermittelt und können
-> je Modell abweichen — bei neuen Geräten erneut gegen `mielecloudservice` plausibilisieren.
+| Feld | Bedeutung | Einheit | Beleg |
+|---|---|---|---|
+| #4 | **Laufzeit** (zählt aufwärts; Name `remainingTimeInMinutes` irreführend) | min | belegt |
+| #5 | Programmphase; 12014 = Programmende, 12109 = Ruhezustand (WCR860) | — | beobachtet |
+| #8..#12 | heaterRelay / lyePump / circulationPump / coldWaterValve / hotWaterValve (bool) | — | Index-Ausrichtung |
+| **#16** | **Antriebsenergie** — zählt im Lauf aufwärts, OHNE Heizstab; fällt bei 12109 auf 0 | Wh | 13 Programme, R² 0,999 |
+| #17 | waterConsumedInLitres | — | **widerlegt** (immer 0) |
+| **#21** | Wasser (Durchflusszähler) | 5 ml je Impuls (÷200 → l) | 0,5 % gegen Hauswasserzähler |
+| **#25** | **Heizenergie-Vorgabe** für die Hauptwäsche = #26 × 2020 W bei 230 V; einmal gesetzt, nie nachgeführt | Wh | 31 Paare ±1 Wh |
+| **#26** | **geplante Heizzeit** | s | dto. |
+
+> #25 + #16 taugt NICHT als Gesamtenergie (im Mittel 40 % daneben). Genau (~2 %) ginge nur
+> #16 + Einschaltdauer Heizrelais (#8) × 2020 W × (U/230)² + 0,2 Wh/min — bräuchte eine Abfrage
+> etwa alle 10 s. Die Indizes können je Modell abweichen.
 
 ## 6. SuperVision-Push (Enrollment)
 

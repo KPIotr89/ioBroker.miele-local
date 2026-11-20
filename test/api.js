@@ -30,6 +30,24 @@ describe('Anfragen an ein Gerät', () => {
         expect(hoechstens, 'gleichzeitige Anfragen').to.equal(1);
     });
 
+    it('zählt laufende und anstehende Anfragen - der Leaf-Scan weicht danach aus', async () => {
+        const loesen = [];
+        const api = testApi(() => new Promise((r, f) => loesen.push({ r, f })));
+        expect(api.offen).to.equal(0);
+        const a = api._request('GET', 'Devices/x/State');
+        const b = api._request('GET', 'Devices/x/DOP2/2/6195');
+        expect(api.offen).to.equal(2);
+        await new Promise(r => setImmediate(r));
+        loesen.shift().r('ok');
+        await a;
+        await new Promise(r => setImmediate(r));
+        expect(api.offen).to.equal(1);
+        loesen.shift().f(new Error('Timeout'));
+        await b.catch(() => {});
+        await new Promise(r => setImmediate(r));
+        expect(api.offen, 'auch nach einem Fehler wieder frei').to.equal(0);
+    });
+
     it('behält die Reihenfolge bei', async () => {
         const dran = [];
         const api = testApi((m, res) => {

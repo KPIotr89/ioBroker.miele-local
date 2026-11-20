@@ -48,9 +48,9 @@ Checkbox „Datenpunkt-Namen auf Deutsch" aktiv ist (Standard). Enum-Felder gibt
 
 | Datenpunkt | Deutscher Name | Typ | Einheit | Bedeutung |
 |---|---|---|---|---|
-| `eco.energy` | Energieverbrauch | number | kWh | aktueller Verbrauch (Feld #25 ÷ 1000) |
-| `eco.energyWh` | Energieverbrauch (Rohwert Wh) | number | Wh | Rohwert Feld #25 |
-| `eco.water` | Wasserverbrauch | number | l | aktueller Verbrauch (Feld #40 ÷ 10) |
+| `eco.energy` | Heizenergie (Vorgabe bei 230 V) | number | kWh | Feld #25 ÷ 1000 – geplante Heizenergie der Hauptwäsche, keine Messung; bei Geräten ohne 2/6195 (Spülmaschine) Differenz der Lebenszähler 2/1585 Feld 6.5 über das Programm |
+| `eco.energyWh` | Heizenergie in Wh (Vorgabe bei 230 V, keine Messung) | number | Wh | Rohwert Feld #25 |
+| `eco.water` | Wasserverbrauch | number | l | laufendes bzw. letztes Programm (Feld #21 ÷ 200; ohne 2/6195 Differenz von 2/1585 Feld 6.6) |
 
 ## control (nur bei aktivierter Steuerung — beschreibbar)
 

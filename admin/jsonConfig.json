@@ -469,7 +469,7 @@
                     "md": 12,
                     "lg": 12,
                     "xl": 12,
-                    "help": "The consumption reported by the appliance is an estimate, not a measurement. If you have a metering plug in front of it, enter its meter state here."
+                    "help": "The energy reported by the appliance is only its planned heating energy, not a measurement. If you have a metering plug in front of it, enter its meter state here."
                 },
                 "leafStates": {
                     "type": "checkbox",

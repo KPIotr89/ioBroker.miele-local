@@ -143,7 +143,9 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         }
     });
 
-    it('Programmnamen: Home Assistant, dann eigene (PROGRAMME), sonst Englisch - nie leer', () => {
+    it('Programmnamen: Home Assistant, dann eigene (PROGRAMME), sonst Englisch - nie leer', function () {
+        // Rund 1,7 s auf dem Entwicklungsrechner - knapp unter Mochas Vorgabe von 2 s.
+        this.timeout(20000);
         for (const [dt, m] of Object.entries(enums.BY_TYPE)) {
             for (const [k, schluessel] of Object.entries(enums.TABLES[m.program])) {
                 if (!schluessel || werte.NICHTS.has(schluessel)) {
@@ -154,12 +156,7 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
                     expect(t, `${dt}/${k} ${sp}`).to.be.a('string').and.not.equal('');
                     if (sp !== 'de' && sp !== 'en') {
                         const ha = HA[sp].program[schluessel];
-                        const jeCode = PROGRAMME[sp] && (PROGRAMME[sp].programNachCode || {})[m.program];
-                        const eigen = (jeCode && jeCode[k]) || (PROGRAMME[sp] && PROGRAMME[sp].program[schluessel]);
-                        if (jeCode && jeCode[k]) {
-                            expect(t).to.equal(jeCode[k]);
-                            continue;
-                        }
+                        const eigen = PROGRAMME[sp] && PROGRAMME[sp][m.program] && PROGRAMME[sp][m.program][schluessel];
                         expect(t).to.equal(ha || eigen || werte.wertText('program', 'en', Number(dt), Number(k)));
                     }
                 }
@@ -169,22 +166,27 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         expect(werte.wertText('program', 'fr', 1, 1)).to.equal('Coton');
         expect(werte.wertText('program', 'uk', 1, 1)).to.equal('Cottons');
         expect(werte.wertText('program', 'pl', 1, 1)).to.equal('Bawełna');
-        // derselbe Bezeichner, je Geraet ein anderer Name: Rohwert 123 der Waschmaschine
-        expect(werte.wertText('program', 'pl', 1, 123)).to.equal('Ciemne/Jeans');
         expect(werte.wertText('program', 'pl', 1, 24)).to.equal('Jeans');
+        expect(werte.wertText('program', 'pl', 1, 123)).to.equal('Jeans');
         expect(werte.wertText('program', 'pl', 2, 13)).to.equal('Jeans');
+        // eigene Namen gelten nur fuer ihre Programmtabelle: Geschirrspueler und Backofen bleiben
+        expect(werte.wertText('program', 'pl', 7, 3)).to.equal(werte.wertText('program', 'en', 7, 3));
+        expect(werte.wertText('program', 'pl', 12, 97)).to.equal(werte.wertText('program', 'en', 12, 97));
+        // derselbe Bezeichner, je Geraeteart ein anderer Beleg: Firanki gibt es nur an der Waschmaschine
+        expect(werte.wertText('program', 'pl', 1, 22)).to.equal('Firanki');
+        expect(werte.wertText('program', 'pl', 2, 10055)).to.equal(werte.wertText('program', 'en', 2, 10055));
     });
 
     it('eigene Programmnamen (PROGRAMME) gehoeren zu Bezeichnern, die es gibt', () => {
-        const bekannt = new Set();
-        for (const m of Object.values(enums.BY_TYPE)) {
-            Object.values(enums.TABLES[m.program]).forEach(k => bekannt.add(k));
-        }
-        for (const [sp, arten] of Object.entries(PROGRAMME)) {
+        for (const [sp, tabellen] of Object.entries(PROGRAMME)) {
             expect(SPRACHEN, sp).to.include(sp);
-            for (const [k, t] of Object.entries(arten.program)) {
-                expect(bekannt.has(k), `${sp} ${k}`).to.equal(true);
-                expect(t, `${sp} ${k}`).to.be.a('string').and.not.equal('');
+            for (const [tab, namen] of Object.entries(tabellen)) {
+                expect(enums.TABLES[tab], `${sp} ${tab}`).to.be.an('object');
+                const bekannt = new Set(Object.values(enums.TABLES[tab]));
+                for (const [k, t] of Object.entries(namen)) {
+                    expect(bekannt.has(k), `${sp} ${tab} ${k}`).to.equal(true);
+                    expect(t, `${sp} ${tab} ${k}`).to.be.a('string').and.not.equal('');
+                }
             }
         }
     });
@@ -195,7 +197,8 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         expect(text('Status', 5, pl, 'statusText')).to.equal('Pracuje');
         expect(text('ProgramType', 1, pl, 'programTypeText')).to.equal('Własny program');
         expect(text('ProgramID', 1, pl, 'programText')).to.equal('Bawełna');
-        expect(text('ProgramID', 0, pl, 'programText')).to.equal('Brak programu');
+        // "kein Programm" hat keinen belegten polnischen Namen: Englisch
+        expect(text('ProgramID', 0, pl, 'programText')).to.equal('No program');
         expect(text('ProgramPhase', 256, pl, 'programPhaseText')).to.equal('Nie uruchomiony');
         expect(text('DryingStep', 0, { deviceType: 2, sprache: 'pl' }, 'dryingStepText')).to.equal('Ekstra suche');
         // keine polnische Uebersetzung: englischer Name, unbekannter Rohwert: Ersatztext

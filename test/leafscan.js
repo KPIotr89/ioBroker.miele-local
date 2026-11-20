@@ -28,32 +28,173 @@ describe('Leaf-Scan: Adressen', () => {
     });
 });
 
-describe('Leaf-Scan: Fortsetzen', () => {
+describe('Leaf-Scan: langsamer Planer - welche Adresse als naechste', () => {
     const bereiche = [{ unit: 2, von: 1, bis: 10 }];
+    const T = 1_000_000_000_000;
 
     it('faengt vorn an, wenn noch nichts da ist', () => {
-        const n = ls.naechste({}, 3, bereiche);
-        expect(n).to.deep.equal([{ unit: 2, attr: 1 }, { unit: 2, attr: 2 }, { unit: 2, attr: 3 }]);
+        expect(ls.naechsteAdresse({}, T, bereiche)).to.deep.equal({ unit: 2, attr: 1 });
     });
 
-    it('setzt hinter dem Geprueften fort', () => {
-        /*
-         * Der Kern der Schonung: Ein Scan darf jederzeit abbrechen - Adapterneustart,
-         * Netzfehler, Geraet schlaeft ein - und kostet dann nichts. Beim naechsten Mal geht
-         * es an derselben Stelle weiter statt von vorn.
-         */
+    it('setzt hinter dem Bestaetigten fort - ein Abbruch kostet nichts', () => {
         let erg = {};
-        for (let a = 1; a <= 4; a++) erg = ls.aufnehmen(erg, 2, a, { status: 500 });
-        expect(ls.naechste(erg, 2, bereiche)).to.deep.equal([
-            { unit: 2, attr: 5 }, { unit: 2, attr: 6 },
-        ]);
+        for (let a = 1; a <= 4; a++) {
+            erg = ls.einordnen(erg, 2, a, { status: 404 }, { wach: true, jetzt: T });
+        }
+        expect(ls.naechsteAdresse(erg, T + 1000, bereiche)).to.deep.equal({ unit: 2, attr: 5 });
     });
 
-    it('liefert nichts mehr, wenn alles geprueft ist', () => {
+    it('fragt alte 500er aus Schlafphasen erneut, in der Reihenfolge der Bereiche', () => {
+        // 2/1585 stand bis 13.11.2026 als 500/404 im Ergebnis und antwortet heute mit Daten.
+        const erg = { '2/1': { antwortet: false, status: 404 }, '2/2': { antwortet: false, status: 500 } };
+        expect(ls.naechsteAdresse(erg, T, bereiche)).to.deep.equal({ unit: 2, attr: 2 });
+        expect(ls.endgueltig(erg['2/2'])).to.equal(false);
+    });
+
+    it('zaehlt ein altes 404 als eine Bestaetigung, ein altes 500 als keine', () => {
+        expect(ls.bestaetigungen({ antwortet: false, status: 404 })).to.equal(1);
+        expect(ls.bestaetigungen({ antwortet: false, status: 500 })).to.equal(0);
+        expect(ls.endgueltig({ antwortet: false, status: 404 })).to.equal(false);
+    });
+
+    it('bestaetigt erst nach dem Mindestabstand ein zweites Mal', () => {
         let erg = {};
-        for (let a = 1; a <= 10; a++) erg = ls.aufnehmen(erg, 2, a, { status: 500 });
-        expect(ls.naechste(erg, 5, bereiche)).to.be.empty;
+        for (let a = 1; a <= 10; a++) {
+            erg = ls.einordnen(erg, 2, a, { status: 404 }, { wach: true, jetzt: T });
+        }
+        expect(ls.naechsteAdresse(erg, T + 60000, bereiche), 'zu frueh').to.equal(null);
+        const spaeter = T + ls.BESTAETIGUNG_ABSTAND_MS + 1;
+        expect(ls.naechsteAdresse(erg, spaeter, bereiche)).to.deep.equal({ unit: 2, attr: 1 });
+        erg = ls.einordnen(erg, 2, 1, { status: 404 }, { wach: true, jetzt: spaeter });
+        expect(ls.endgueltig(erg['2/1'])).to.equal(true);
+        expect(ls.fortschritt(erg, bereiche).fertig).to.equal(1);
+    });
+
+    it('ist fertig, wenn alles bestaetigt ist', () => {
+        let erg = {};
+        for (let a = 1; a <= 10; a++) {
+            erg = ls.einordnen(erg, 2, a, { status: 404 }, { wach: true, jetzt: T });
+            erg = ls.einordnen(erg, 2, a, { status: 404 }, { wach: true, jetzt: T + ls.BESTAETIGUNG_ABSTAND_MS });
+        }
+        expect(ls.naechsteAdresse(erg, T + 2 * ls.BESTAETIGUNG_ABSTAND_MS, bereiche)).to.equal(null);
         expect(ls.fortschritt(erg, bereiche).text).to.match(/done/);
+    });
+});
+
+describe('Leaf-Scan: langsamer Planer - Absagen einordnen', () => {
+    const T = 1_000_000_000_000;
+
+    it('laesst eine gueltige 404-Bestaetigung von einem unbelegten 500 unberuehrt', () => {
+        let erg = ls.einordnen({}, 2, 9, { status: 404 }, { wach: true, jetzt: T });
+        erg = ls.einordnen(erg, 2, 9, { status: 500 }, { wach: false, jetzt: T + 1 });
+        expect(erg['2/9'].status).to.equal(404);
+        expect(ls.bestaetigungen(erg['2/9'])).to.equal(1);
+    });
+
+    it('zaehlt ein 500 nur mit Wachbeleg', () => {
+        const ohne = ls.einordnen({}, 2, 9, { status: 500 }, { wach: false, jetzt: T });
+        expect(ls.bestaetigungen(ohne['2/9'])).to.equal(0);
+        const mit = ls.einordnen({}, 2, 9, { status: 500 }, { wach: true, jetzt: T });
+        expect(ls.bestaetigungen(mit['2/9'])).to.equal(1);
+    });
+
+    it('fragt ein unbelegtes 500 nicht im Takt erneut', () => {
+        const erg = ls.einordnen({}, 2, 1, { status: 500 }, { wach: false, jetzt: T });
+        const b = [{ unit: 2, von: 1, bis: 1 }];
+        expect(ls.naechsteAdresse(erg, T + 60000, b)).to.equal(null);
+        expect(ls.naechsteAdresse(erg, T + ls.WIEDERHOLUNG_MS + 1, b)).to.deep.equal({ unit: 2, attr: 1 });
+    });
+
+    it('beginnt die Zaehlung neu, wenn sich der Status aendert', () => {
+        let erg = ls.einordnen({}, 2, 9, { status: 500 }, { wach: true, jetzt: T });
+        erg = ls.einordnen(erg, 2, 9, { status: 404 }, { wach: true, jetzt: T + ls.BESTAETIGUNG_ABSTAND_MS });
+        expect(ls.bestaetigungen(erg['2/9'])).to.equal(1);
+    });
+
+    it('nimmt einen Treffer sofort und merkt sich den alten Status', () => {
+        const erg = ls.einordnen(
+            { '2/1585': { antwortet: false, status: 500 } },
+            2,
+            1585,
+            { felder: { 1: 7 } },
+            { wach: true, jetzt: T },
+        );
+        expect(erg['2/1585'].antwortet).to.equal(true);
+        expect(erg['2/1585'].vorher).to.equal(500);
+        expect(ls.endgueltig(erg['2/1585'])).to.equal(true);
+    });
+
+    it('legt eine Adresse, die immer wieder stoert, nach drei Stoerungen still', () => {
+        let erg = {};
+        for (let i = 0; i < ls.STOERUNGEN_JE_ADRESSE; i++) {
+            expect(ls.endgueltig(erg['14/1570']), `${i}`).to.not.equal(true);
+            erg = ls.einordnen(erg, 14, 1570, { status: 'Fehler: Timeout x' }, { wach: true, jetzt: T + i });
+        }
+        expect(ls.endgueltig(erg['14/1570'])).to.equal(true);
+        expect(erg['14/1570'].antwortet).to.equal(false);
+    });
+
+    it('vermerkt 503 bei wachem Modul an der Adresse und laesst sie nach drei Mal liegen', () => {
+        // Backofen 13.11.2026: 14/1566-1569 404, 14/1570 503 - der Scan darf dort nicht haengen.
+        let erg = {};
+        for (let i = 0; i < ls.STOERUNGEN_JE_ADRESSE; i++) {
+            erg = ls.einordnen(erg, 14, 1570, { status: 503 }, { wach: true, jetzt: T + i, besetztJeAdresse: true });
+        }
+        expect(ls.endgueltig(erg['14/1570'])).to.equal(true);
+        const b = [{ unit: 14, von: 1570, bis: 1571 }];
+        const eins = ls.einordnen({}, 14, 1570, { status: 503 }, { wach: true, jetzt: T, besetztJeAdresse: true });
+        expect(ls.naechsteAdresse(eins, T + 1000, b)).to.deep.equal({ unit: 14, attr: 1571 });
+    });
+
+    it('legt fuer 503 nichts ab', () => {
+        // Der Planer behandelt 503 vorher; einordnen darf es trotzdem nicht als Absage zaehlen.
+        const erg = ls.einordnen({}, 2, 1, { status: 503 }, { wach: true, jetzt: T });
+        expect(erg['2/1']).to.equal(undefined);
+    });
+});
+
+describe('Leaf-Scan: langsamer Planer - Tempo und Schutz', () => {
+    it('fragt hoechstens alle 20-30 Sekunden', () => {
+        expect(ls.TAKT_MS).to.be.within(20000, 30000);
+    });
+
+    it('zieht sich nach Stoerungen immer laenger zurueck, 5 bis 30 Minuten', () => {
+        expect(ls.rueckzugMs(1)).to.equal(5 * 60000);
+        expect(ls.rueckzugMs(2)).to.equal(10 * 60000);
+        expect(ls.rueckzugMs(3)).to.equal(20 * 60000);
+        expect(ls.rueckzugMs(9)).to.equal(30 * 60000);
+    });
+
+    it('verzeiht Stoerungen erst nach einer stoerungsfreien Schonphase, nicht nach einer guten Antwort', () => {
+        const jetzt = 1e12;
+        expect(ls.fehlerVerzeihen(undefined, jetzt)).to.equal(true);
+        expect(ls.fehlerVerzeihen(0, jetzt)).to.equal(true);
+        expect(ls.fehlerVerzeihen(jetzt + 60000, jetzt)).to.equal(false);
+        expect(ls.fehlerVerzeihen(jetzt - 1, jetzt)).to.equal(true);
+    });
+
+    it('scannt nicht bei gewaehltem, pausiertem, gestoertem oder unbekanntem Zustand', () => {
+        for (const st of [3, 4, 6, 8, 9, 255, null]) {
+            expect(ls.scanErlaubt({ status: st, seitMs: 3600000, verbunden: true }), String(st)).to.equal(false);
+        }
+    });
+
+    it('scannt im Programm nur gebremst und erst nach zehn Minuten', () => {
+        expect(ls.scanErlaubt({ status: 5, seitMs: 300000, verbunden: true })).to.equal(false);
+        expect(ls.scanErlaubt({ status: 5, seitMs: 900000, verbunden: true })).to.equal('betrieb');
+        expect(ls.BETRIEB_ABSTAND_MS).to.be.at.least(60000);
+    });
+
+    it('scannt im Aus/Ein/Ende erst nach einer Ruhezeit', () => {
+        expect(ls.scanErlaubt({ status: 1, seitMs: 60000, verbunden: true })).to.equal(false);
+        expect(ls.scanErlaubt({ status: 1, seitMs: 600000, verbunden: true })).to.equal('ruhe');
+        expect(ls.scanErlaubt({ status: 2, seitMs: 600000, verbunden: true })).to.equal('ruhe');
+        expect(ls.scanErlaubt({ status: 7, seitMs: 60000, verbunden: true })).to.equal(false);
+        expect(ls.scanErlaubt({ status: 7, seitMs: 180000, verbunden: true })).to.equal('ruhe');
+    });
+
+    it('scannt nicht, wenn die normale Abfrage das Geraet nicht erreicht', () => {
+        expect(ls.scanErlaubt({ status: 1, seitMs: 3600000, verbunden: false })).to.equal(false);
     });
 });
 
@@ -224,10 +365,13 @@ describe('Leaf-Scan: Reihenfolge', () => {
             .to.be.true;
     });
 
-    it('erreicht das EcoFeedback im ERSTEN Durchgang', () => {
-        const ersten = ls.naechste({}, ls.JE_DURCHGANG);
-        const schluessel = ersten.map(a => ls.schluessel(a.unit, a.attr));
-        expect(schluessel).to.include('2/6100');
+    it('beginnt am EcoFeedback', () => {
+        expect(ls.naechsteAdresse({}, Date.now())).to.deep.equal({ unit: 2, attr: 6100 });
+    });
+
+    it('stellt Unit 14 ans Ende - dort knickten die EK037-Module ein', () => {
+        const alle = ls.adressen();
+        expect(alle[alle.length - 1].unit).to.equal(14);
     });
 
     it('gibt Unit 1 und 3 nicht auf, stellt sie nur zurueck', () => {
@@ -255,23 +399,6 @@ describe('Leaf-Scan: Geduld statt Abbruch', () => {
         expect(ls.beschaeftigt({ status: 'Fehler: socket hang up' })).to.be.false;
         expect(ls.beschaeftigt({ status: 'Fehler: Timeout' })).to.be.false;
         expect(ls.beschaeftigt({ status: 101 })).to.be.false;
-    });
-
-    it('wartet nach jeder Absage laenger', () => {
-        const zeiten = [1, 2, 3, 4].map(n => ls.wartezeitMs(n));
-        for (let i = 1; i < zeiten.length; i++) {
-            expect(zeiten[i], `${i}. Absage`).to.be.above(zeiten[i - 1]);
-        }
-    });
-
-    it('wartet nie laenger als eine Minute', () => {
-        // Sonst haengt ein Durchgang an einer einzigen Adresse fest.
-        expect(ls.wartezeitMs(20)).to.be.at.most(60000);
-    });
-
-    it('gibt eine Adresse nach mehreren Anlaeufen frei', () => {
-        // Sie bleibt offen und kommt im naechsten Durchgang wieder dran.
-        expect(ls.ABSAGEN_JE_ADRESSE).to.be.within(3, 8);
     });
 
     it('haelt eine Absage weiterhin nicht fuer eine Antwort', () => {
@@ -331,5 +458,66 @@ describe('Leaf-Scan: Kontrollfrage, die nie antwortet', () => {
     it('wagt nichts bei einem Geraet, das die Adresse kennt', () => {
         // Dort heisst ein 500 wirklich "gerade nicht" - das ist zu respektieren.
         expect(ls.trotzdemVersuchen({ kennt: true, taub: 99, grenze: 10 })).to.be.false;
+    });
+});
+
+describe('Leaf-Scan: Antwort mit Parse-Fehler', () => {
+    // Bis 0.5.2 blieb eine solche Adresse offen ("Fehler: Unknown DOP2 field type 33" ist kein
+    // Status), und der Scan wurde nie fertig - an der WWG760 bei 2/1585 gesehen.
+    const ergebnis = { status: 200, fehler: 'Unknown DOP2 field type 34 @40', roh: '00aa' };
+
+    it('zaehlt als beantwortet', () => {
+        expect(ls.beantwortet(ergebnis)).to.equal(true);
+        expect(ls.ueberlastet(ergebnis)).to.equal(false);
+    });
+
+    it('legt Status numerisch und Fehlertext getrennt ab - und die Adresse ist erledigt', () => {
+        const erg = ls.aufnehmen({}, 2, 1585, ergebnis);
+        expect(erg['2/1585']).to.deep.equal({
+            antwortet: true,
+            status: 200,
+            fehler: 'Unknown DOP2 field type 34 @40',
+            felder: {},
+            anzahl: 0,
+            roh: '00aa',
+        });
+        expect(ls.endgueltig(erg['2/1585'])).to.equal(true);
+        expect(ls.fortschritt(erg).gefunden).to.equal(1);
+    });
+});
+
+describe('Leaf-Scan: Export ohne Kennungen', () => {
+    const SERIE = '000111111111';
+    const scan = {
+        '2/145': { antwortet: true, felder: { 1: SERIE, 2: '65', 3: 'G5840', 4: '11223344' }, anzahl: 4 },
+        '14/1565': { antwortet: true, felder: { 1: '001D63FFFEAAA2DC' }, anzahl: 1 },
+        '14/1566': { antwortet: true, felder: { 1: 12345678, 2: [1, 2, 3] }, anzahl: 2 },
+        '14/1571': { antwortet: true, felder: { 17: 'mac-001D63FFFEAAA2DC', 2: true }, anzahl: 2 },
+        '14/1573': { antwortet: true, felder: { 2: [192, 168, 30, 80], 9: 'Mein-WLAN' }, anzahl: 2 },
+        '2/119': { antwortet: true, felder: { 1: 439713 }, anzahl: 1 },
+        '2/256': { antwortet: true, felder: { 3: `Datei ${SERIE}.bin`, 4: '00:1d:63:aa:bb:cc' }, anzahl: 2 },
+        '2/1585': { antwortet: true, status: 200, fehler: 'x', felder: {}, anzahl: 0, roh: Buffer.from(SERIE).toString('hex') },
+        '2/1586': { antwortet: false, status: 404 },
+    };
+
+    it('maskiert Seriennummer, Modulnummer, MAC, IP und WLAN-Namen', () => {
+        const a = ls.anonymisieren(scan, [SERIE]);
+        const text = JSON.stringify(a);
+        expect(text).to.not.include(SERIE);
+        expect(text).to.not.include('Mein-WLAN');
+        expect(text).to.not.include('1D63');
+        expect(text).to.not.include('12345678');
+        expect(a['14/1573'].felder[2], 'Aufbau bleibt sichtbar').to.deep.equal(['***', '***', '***', '***']);
+        expect(a['14/1571'].felder[2], 'Wahrheitswerte verraten nichts').to.equal(true);
+        expect(a['2/256'].felder[4]).to.equal('***');
+        expect(a['2/1585'].roh).to.equal('***');
+        expect(a['14/1565'].felder[1], 'EUI/MAC 14/1565').to.equal('***');
+    });
+
+    it('laesst alles andere unveraendert und das Original unberuehrt', () => {
+        const a = ls.anonymisieren(scan, [SERIE]);
+        expect(a['2/119']).to.deep.equal(scan['2/119']);
+        expect(a['2/1586']).to.deep.equal(scan['2/1586']);
+        expect(scan['2/145'].felder[1]).to.equal(SERIE);
     });
 });

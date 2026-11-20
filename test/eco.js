@@ -84,13 +84,29 @@ const objdef = require('../lib/objects');
 const namen = require('../lib/names');
 
 describe('EcoFeedback-Objekte', () => {
-    it('beschreibt den Energiewert als Erwartung, nicht als Messung', () => {
-        // Der Kern der Umbenennung: Am Geraet gemessen weicht der Wert um die Haelfte vom
-        // tatsaechlichen Verbrauch ab (770 Wh gegen 1158 Wh am Shelly). Wer ihn
-        // "Energieverbrauch" nennt, verspricht eine Messung, die er nicht ist.
+    it('beschreibt den Energiewert als Heizenergie-Vorgabe bei 230 V, nicht als Messung', () => {
+        // Befund 13.11.2026 (31 Laeufe, WCR860): Feld 25 = geplante Heizzeit x 2020 W bei 230 V,
+        // einmal gesetzt und nie nachgefuehrt. "Erwartung fuer das Programm" war im Umfang falsch,
+        // "Energieverbrauch" verspraeche eine Messung.
         const c = objdef.ecoCommon(true);
-        expect(c['eco.energy'].name.de).to.match(/Erwartung/);
-        expect(c['eco.energyWh'].name.de).to.match(/Erwartung|keine Messung/);
+        expect(c['eco.energy'].name.de).to.equal('Heizenergie (Vorgabe bei 230 V)');
+        expect(c['eco.energyWh'].name.de).to.match(/Heizenergie.*Vorgabe bei 230 V.*keine Messung/);
+        expect(c['eco.energy'].name.en).to.match(/Heating energy \(setpoint at 230 V\)/);
+    });
+
+    it('nennt die Energie anders, wenn sie aus dem EcoFeedback des Geraets stammt', () => {
+        const c = objdef.ecoCommon(true, true);
+        expect(c['eco.energy'].name.de).to.match(/letzten Programms.*laut Gerät/);
+        expect(c['eco.energyWh'].unit).to.equal('Wh');
+    });
+
+    it('fuehrt die neuen Namen in allen elf Sprachen', () => {
+        for (const amtlich of [false, true]) {
+            const c = objdef.ecoCommon(true, amtlich);
+            for (const sub of ['eco.energy', 'eco.energyWh']) {
+                expect(Object.keys(c[sub].name), `${sub} ${amtlich}`).to.have.length(11);
+            }
+        }
     });
 
     it('gibt dem Wasserwert die Rolle value, nicht value.volume', () => {
@@ -150,7 +166,7 @@ describe('EcoFeedback-Objekte', () => {
         // String allein - beide Formen muessen hier ankommen.
         expect(objdef.ecoCommon(true)['eco.energy'].name).to.be.an('object');
         expect(objdef.ecoCommon(false)['eco.energy'].name)
-            .to.be.a('string').and.match(/estimate/);
+            .to.be.a('string').and.match(/setpoint/);
     });
 });
 
@@ -233,5 +249,65 @@ describe('Eco: Endspurt', () => {
         expect(eco.imEndspurt(5, 35)).to.equal(false);   // Programmbeginn
         expect(eco.imEndspurt(1, 3)).to.equal(false);    // Geraet aus
         expect(eco.imEndspurt(5, null)).to.equal(false); // keine Restzeit bekannt
+    });
+});
+
+describe('Eco: Endstand der Antriebsenergie (F16) halten', () => {
+    // Befund 13.11.2026: F16 zaehlt im Lauf aufwaerts und faellt beim Uebergang in den
+    // Ruhezustand (Phase 12109) auf 0. In 10 von 60 Datensaetzen stand deshalb 0.
+    it('haelt den letzten Wert, wenn das Geraet nach dem Programm nullt', () => {
+        const { werte, gehalten } = eco.endstandHalten({ 16: 57, 21: 6000 }, { 16: 0, 21: 0 }, false);
+        expect(werte).to.deep.equal({ 16: 57, 21: 0 });
+        expect(gehalten).to.deep.equal(['16']);
+    });
+
+    it('schreibt im laufenden Programm jede 0 durch (neuer Lauf)', () => {
+        const { werte, gehalten } = eco.endstandHalten({ 16: 57 }, { 16: 0 }, true);
+        expect(werte[16]).to.equal(0);
+        expect(gehalten).to.deep.equal([]);
+    });
+
+    it('kommt ohne frueheren Stand aus', () => {
+        expect(eco.endstandHalten(null, { 16: 0 }, false).werte).to.deep.equal({ 16: 0 });
+    });
+
+    it('nennt im Protokoll die Felder mit Bedeutung und erkennt die Endphase', () => {
+        const dop2 = require('../lib/dop2');
+        const { feld, struktur, u8, u16, leaf } = require('./lib/dop2bau');
+        const huelle = v => struktur([feld(1, 2, u8(8)), feld(2, 7, u16(v)), feld(3, 2, u8(0))]);
+        const { fields } = dop2.parseLeaf(
+            leaf(2, 6195, [feld(4, 16, huelle(97)), feld(5, 16, huelle(12014)), feld(16, 16, huelle(57)),
+                feld(21, 16, huelle(6000)), feld(25, 16, huelle(1100))]),
+        );
+        const z = eco.prozessZeile(fields);
+        expect(z).to.match(/F25 heating setpoint 1100 Wh/);
+        expect(z).to.match(/F16 drive 57 Wh/);
+        expect(z).to.match(/F21 water 30 l/);
+        expect(z).to.match(/F4 elapsed 97 min/);
+        expect(z).to.match(/F5 phase 12014 \(programme end\)/);
+        expect(z).to.match(/F26 -/);
+    });
+});
+
+/**
+ * Forum 15.11.2026 (WWG760): Nach "no longer queried" schrieb der Adapter weiter
+ * "final phase ... reading every 60 s" und "final reading attempt 1 of 3", ohne zu fragen.
+ */
+describe('Eco: nichts mehr zu holen', () => {
+    it('erst wenn alle drei Quellen abgesagt haben', () => {
+        expect(eco.nichtsMehrZuHolen(3, 3, 3, 3)).to.equal(true);
+    });
+
+    it('nicht, solange der Gerätekontext noch antwortet', () => {
+        expect(eco.nichtsMehrZuHolen(3, 0, 3, 3)).to.equal(false);
+        expect(eco.nichtsMehrZuHolen(3, 3, 1, 3)).to.equal(false);
+    });
+
+    it('nicht, solange das Eco-Leaf noch gefragt wird', () => {
+        expect(eco.nichtsMehrZuHolen(2, 3, 3, 3)).to.equal(false);
+    });
+
+    it('fehlende Zähler gelten als null', () => {
+        expect(eco.nichtsMehrZuHolen(undefined, undefined, undefined, 3)).to.equal(false);
     });
 });
