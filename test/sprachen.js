@@ -166,8 +166,8 @@ describe('Sprachen: Karten, Datenpunkte und Werte', () => {
         expect(werte.wertText('program', 'fr', 1, 1)).to.equal('Coton');
         expect(werte.wertText('program', 'uk', 1, 1)).to.equal('Cottons');
         expect(werte.wertText('program', 'pl', 1, 1)).to.equal('Bawełna');
-        expect(werte.wertText('program', 'pl', 1, 24)).to.equal('Jeans');
-        expect(werte.wertText('program', 'pl', 1, 123)).to.equal('Jeans');
+        expect(werte.wertText('program', 'pl', 1, 24)).to.equal('Ciemne/Jeans');
+        expect(werte.wertText('program', 'pl', 1, 123)).to.equal('Ciemne/Jeans');
         expect(werte.wertText('program', 'pl', 2, 13)).to.equal('Jeans');
         // eigene Namen gelten nur fuer ihre Programmtabelle: Geschirrspueler und Backofen bleiben
         expect(werte.wertText('program', 'pl', 7, 3)).to.equal(werte.wertText('program', 'en', 7, 3));
